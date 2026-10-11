@@ -5,7 +5,7 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "start:dev": "bun --watch run src/main.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bunx --bun tsc --noEmit",
     "test": "bun test test/unit test/integration test/concurrency --pass-with-no-tests",
     "test:unit": "bun test test/unit --pass-with-no-tests",
     "test:integration": "bun test test/integration --timeout 60000 --pass-with-no-tests",
