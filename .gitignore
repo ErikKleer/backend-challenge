@@ -1,0 +1,23 @@
+# Dependências
+node_modules/
+
+# Build / Output
+dist/
+build/
+
+# Variáveis de ambiente e segredos
+.env
+
+# Sistema operacional / IDEs
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs e cobertura de testes
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+coverage/
+.turbo/
