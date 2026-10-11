@@ -10,11 +10,21 @@ export interface ProvisionQueuesOptions {
   endpoint?: string;
   region: string;
   credentials: { accessKeyId: string; secretAccessKey: string };
-  queues: {
-    transactions: string;
-    dlq: string;
-    events: string;
+  prefix?: string;
+  visibilityTimeoutSeconds?: number;
+  maxReceiveCount?: number;
+  queues?: {
+    transactions?: string;
+    dlq?: string;
+    events?: string;
   };
+}
+
+export interface ProvisionedQueuesResult {
+  dlqUrl: string;
+  dlqArn: string;
+  transactionsUrl: string;
+  eventsUrl: string;
 }
 
 async function ensureQueue(
@@ -30,7 +40,6 @@ async function ensureQueue(
       })
     );
     if (res.QueueUrl) {
-      // Caso a fila já existisse com atributos idênticos ou tenha sido criada
       await client.send(
         new SetQueueAttributesCommand({
           QueueUrl: res.QueueUrl,
@@ -58,15 +67,23 @@ async function ensureQueue(
   return urlRes.QueueUrl!;
 }
 
-export async function provisionQueues(options: ProvisionQueuesOptions): Promise<void> {
+export async function provisionQueues(options: ProvisionQueuesOptions): Promise<ProvisionedQueuesResult> {
   const client = new SQSClient({
     region: options.region,
     endpoint: options.endpoint,
     credentials: options.credentials,
   });
 
+  const prefix = options.prefix ?? "";
+  const visibilityTimeout = String(options.visibilityTimeoutSeconds ?? 30);
+  const maxReceiveCount = String(options.maxReceiveCount ?? 5);
+
+  const dlqQueueName = prefix + (options.queues?.dlq ?? "wager-transactions-dlq.fifo");
+  const txQueueName = prefix + (options.queues?.transactions ?? "wager-transactions.fifo");
+  const eventsQueueName = prefix + (options.queues?.events ?? "wager-events.fifo");
+
   // 1. Criar ou atualizar a DLQ
-  const dlqUrl = await ensureQueue(client, options.queues.dlq, {
+  const dlqUrl = await ensureQueue(client, dlqQueueName, {
     FifoQueue: "true",
     MessageRetentionPeriod: "1209600", // 14 dias
   });
@@ -79,26 +96,34 @@ export async function provisionQueues(options: ProvisionQueuesOptions): Promise<
   );
   const dlqArn = dlqAttrs.Attributes?.QueueArn;
   if (!dlqArn) {
-    throw new Error(`Failed to retrieve QueueArn for DLQ: ${options.queues.dlq}`);
+    throw new Error(`Failed to retrieve QueueArn for DLQ: ${dlqQueueName}`);
   }
 
   // 2. Criar ou atualizar a fila de transações com RedrivePolicy apontando para o ARN da DLQ
   const txRedrivePolicy = JSON.stringify({
     deadLetterTargetArn: dlqArn,
-    maxReceiveCount: "5",
+    maxReceiveCount,
   });
 
-  await ensureQueue(client, options.queues.transactions, {
+  const transactionsUrl = await ensureQueue(client, txQueueName, {
     FifoQueue: "true",
-    VisibilityTimeout: "30",
+    VisibilityTimeout: visibilityTimeout,
     RedrivePolicy: txRedrivePolicy,
   });
 
   // 3. Criar ou atualizar a fila de eventos
-  await ensureQueue(client, options.queues.events, {
+  const eventsUrl = await ensureQueue(client, eventsQueueName, {
     FifoQueue: "true",
-    VisibilityTimeout: "30",
+    VisibilityTimeout: visibilityTimeout,
   });
+
+  return {
+    dlqUrl,
+    dlqArn,
+    transactionsUrl,
+    eventsUrl,
+  };
 }
+
 
 

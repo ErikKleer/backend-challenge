@@ -5,9 +5,13 @@ export default defineConfig({
   dbName: process.env.DB_NAME || "wagering_db",
   clientUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost:5432/wagering_db",
   entities: [],
+  discovery: {
+    warnWhenNoEntities: false,
+  },
   extensions: [Migrator],
   migrations: {
     path: "migrations",
     glob: "!(*.d).{ts,js}",
   },
 });
+
