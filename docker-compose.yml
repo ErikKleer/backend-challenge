@@ -1,0 +1,82 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: wagering_db
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d wagering_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3.4.0
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs
+      - AWS_DEFAULT_REGION=us-east-1
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh",
+          "-c",
+          "awslocal sqs list-queues || curl -f http://localhost:4566/_localstack/health",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  provision:
+    build: .
+    command: ["bun", "run", "infra:provision"]
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/wagering_db
+      - AWS_ENDPOINT=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=dummy
+      - AWS_SECRET_ACCESS_KEY=dummy
+      - SQS_QUEUE_WAGER_TRANSACTIONS=wager-transactions.fifo
+      - SQS_QUEUE_WAGER_TRANSACTIONS_DLQ=wager-transactions-dlq.fifo
+      - SQS_QUEUE_WAGER_EVENTS=wager-events.fifo
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  migrate:
+    build: .
+    command: ["bun", "run", "migration:up"]
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/wagering_db
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    command: ["bun", "run", "start"]
+    profiles: ["app"]
+    ports:
+      - "3000"
+    environment:
+      - PORT=3000
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/wagering_db
+      - AWS_ENDPOINT=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=dummy
+      - AWS_SECRET_ACCESS_KEY=dummy
+      - SQS_QUEUE_WAGER_TRANSACTIONS=wager-transactions.fifo
+      - SQS_QUEUE_WAGER_TRANSACTIONS_DLQ=wager-transactions-dlq.fifo
+      - SQS_QUEUE_WAGER_EVENTS=wager-events.fifo
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      provision:
+        condition: service_completed_successfully
