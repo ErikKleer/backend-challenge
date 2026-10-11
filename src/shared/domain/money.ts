@@ -167,6 +167,10 @@ export class Money {
   }
 
   // ---- Serialização e representação
+  public get amount(): string {
+    return this.value.toFixed(2);
+  }
+
 
   public toJSON(): MoneyProps {
     return {

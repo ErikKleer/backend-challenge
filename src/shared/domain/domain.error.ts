@@ -66,3 +66,15 @@ export class InvalidWalletError extends DomainError {
     super(message);
   }
 }
+
+
+/**
+ * Lançado quando ocorre uma transição ou operação inválida de estado em WagerTransaction.
+ */
+export class InvalidTransactionStateError extends DomainError {
+  public readonly code = "INVALID_TRANSACTION_STATE";
+
+  constructor(message: string) {
+    super(message);
+  }
+}
