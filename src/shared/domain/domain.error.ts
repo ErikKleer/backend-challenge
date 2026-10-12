@@ -69,6 +69,17 @@ export class InvalidWalletError extends DomainError {
 
 
 /**
+ * Lançado quando um evento de integração é construído a partir de um estado inconsistente.
+ */
+export class InvalidIntegrationEventError extends DomainError {
+  public readonly code = "INVALID_INTEGRATION_EVENT";
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
  * Lançado quando ocorre uma transição ou operação inválida de estado em WagerTransaction.
  */
 export class InvalidTransactionStateError extends DomainError {

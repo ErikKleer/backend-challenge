@@ -133,6 +133,24 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
 
 
 
+### ADR 9: Eventos de Integração, `eventId` Determinístico e `aggregateId = walletId`
+
+- **Contexto:** O serviço publica eventos de integração via Transactional Outbox para consumidores externos. A publicação é *at-least-once*: o mesmo evento pode chegar mais de uma vez (redelivery, publisher que morre após enviar e antes de marcar como publicado, reexecução do fluxo). O payload precisa ser JSON estável e versionável, sem tipos monetários ambíguos.
+- **Decisão:**
+  1. **Envelope:** `IntegrationEvent<T>` é uma classe abstrata (`src/messaging/domain/`). Cada evento é uma subclasse com `eventType` e `version = 1` no tipo e uma factory `static from(...)` que recebe um `EventContext { correlationId, causationId?, now }`. `toJSON()` serializa `occurredAt` em ISO-8601 e omite `causationId` quando ausente. `data` carrega `MoneyProps` (string decimal com 2 casas), nunca `Money` nem `number`.
+  2. **Eventos mínimos:**
+     | Evento | Quando é emitido | Campos de `data` |
+     |---|---|---|
+     | `WagerTransactionProcessed` | Qualquer transação aplicada (`PROCESSED`), inclusive `LOSS` e `OPENING` | dados da transação, `referenceTransactionId?`, `observedBalance`, `processedAt` |
+     | `WagerTransactionRejected` | Transação rejeitada por regra de negócio (`REJECTED`) | dados da transação, `failureCode`, `observedBalance?` |
+     | `WalletBalanceChanged` | **Somente** quando o saldo muda (há lançamento no ledger) | `walletId`, `transactionId`, `direction`, `money`, `balanceBefore`, `balanceAfter`, `walletVersion` |
+     | `WagerTransactionPendingReference` | Referência ausente ou ainda não finalizada (`PENDING_REFERENCE`) | dados da transação, `referenceExternalTransactionId` |
+
+     "Dados da transação" = `transactionId`, `walletId`, `playerId`, `providerId`, `externalTransactionId`, `roundId`, `gameId`, `kind`, `money`. As factories lançam `InvalidIntegrationEventError` se a transação não estiver no estado esperado, evitando emitir um evento que não corresponde ao fato.
+  3. **`eventId` determinístico:** UUID v5 sobre `"{transactionId}:{eventType}"` com namespace fixo do projeto (`EVENT_ID_NAMESPACE`, que nunca deve mudar). A mesma transação jamais produz dois eventos do mesmo tipo com ids diferentes. Reexecuções do fluxo geram o mesmo id e o `ON CONFLICT DO NOTHING` do outbox descarta a duplicata; no broker o id é o `MessageDeduplicationId`, e o consumidor o usa para deduplicar. Uma transação emite cada tipo no máximo uma vez, o que casa com `UNIQUE(transaction_id, wallet_id)` no ledger (no máximo um `WalletBalanceChanged` por transação).
+  4. **`aggregateId = walletId`** em todos os eventos. É o `MessageGroupId` do FIFO: eventos da mesma wallet são ordenados entre si no broker; wallets distintas progridem em paralelo.
+- **Consequências:** Eventos reaplicáveis sem efeito colateral e payload auditável e versionável. Para mudar o formato de um evento, incrementa-se `version` (o tipo e a versão andam juntos).
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid
