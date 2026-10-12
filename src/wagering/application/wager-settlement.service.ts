@@ -1,4 +1,4 @@
-import { Inject } from "@nestjs/common";
+import { Inject, Optional } from "@nestjs/common";
 import { OUTBOX_REPOSITORY_TOKEN, type OutboxRepository } from "../../messaging/application/outbox.repository.port";
 import type { EventContext } from "../../messaging/domain/integration-event";
 import { OutboxMessage } from "../../messaging/domain/outbox-message";
@@ -6,6 +6,7 @@ import { WagerTransactionPendingReference } from "../../messaging/domain/wager-t
 import { WagerTransactionProcessed } from "../../messaging/domain/wager-transaction-processed.event";
 import { WagerTransactionRejected } from "../../messaging/domain/wager-transaction-rejected.event";
 import { WalletBalanceChanged } from "../../messaging/domain/wallet-balance-changed.event";
+import { FAULT_INJECTOR_TOKEN, type FaultInjector, FaultPoint, NOOP_FAULT_INJECTOR } from "../../shared/application/fault-injector.port";
 import { ID_GENERATOR_TOKEN, type IdGenerator } from "../../shared/application/id-generator.port";
 import { WalletNotFoundError } from "../../shared/domain/domain.error";
 import { LEDGER_REPOSITORY_TOKEN, type LedgerRepository } from "../../wallet/application/ledger.repository.port";
@@ -41,6 +42,7 @@ export class WagerSettlementService {
     @Inject(OUTBOX_REPOSITORY_TOKEN) private readonly outbox: OutboxRepository,
     @Inject(ID_GENERATOR_TOKEN) private readonly ids: IdGenerator,
     @Inject(PENDING_REFERENCE_POLICY_TOKEN) private readonly pendingPolicy: PendingReferencePolicy,
+    @Optional() @Inject(FAULT_INJECTOR_TOKEN) private readonly faults: FaultInjector = NOOP_FAULT_INJECTOR,
   ) {}
 
   public async settle(transaction: WagerTransaction, context: EventContext): Promise<void> {
@@ -102,6 +104,8 @@ export class WagerSettlementService {
             : wallet.credit(operation);
         await this.wallets.updateBalance(wallet, expectedVersion);
         await this.ledger.append(entry);
+        // Só em teste: morte com saldo e lançamento gravados e a transação SQL ainda aberta
+        this.faults.reach(FaultPoint.AfterLedgerBeforeCommit);
         transaction.markProcessed(reference?.id, wallet.balance, now);
         break;
       }

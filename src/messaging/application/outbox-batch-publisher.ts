@@ -1,4 +1,5 @@
 import type { Clock } from "../../shared/application/clock.port";
+import { type FaultInjector, FaultPoint, NOOP_FAULT_INJECTOR } from "../../shared/application/fault-injector.port";
 import type { UnitOfWork } from "../../shared/application/unit-of-work.port";
 import type { AppLogger } from "../../shared/infrastructure/observability/app-logger";
 import type { MetricsService } from "../../shared/infrastructure/observability/metrics.service";
@@ -24,6 +25,8 @@ export interface OutboxBatchPublisherDependencies {
   clock: Clock;
   metrics: MetricsService;
   logger: AppLogger;
+  /** Pontos de falha de teste; ausente = no-op. */
+  faults?: FaultInjector;
 }
 
 interface PublishFailure {
@@ -90,6 +93,11 @@ export class OutboxBatchPublisher {
         message.markPublished(clock.now());
         publishedIds.push(message.id);
         await outbox.save(message);
+      }
+
+      if (publishedIds.length > 0) {
+        // Só em teste: eventos já no SQS, linhas ainda sem marca e a transação sem commit
+        (this.deps.faults ?? NOOP_FAULT_INJECTOR).reach(FaultPoint.AfterPublishBeforeCommit);
       }
 
       return messages.length;

@@ -8,6 +8,7 @@ import {
   MESSAGE_ACKNOWLEDGER_TOKEN,
   type MessageAcknowledger,
 } from "../../../messaging/application/message-acknowledger.port";
+import { FAULT_INJECTOR_TOKEN, type FaultInjector } from "../../../shared/application/fault-injector.port";
 import { createSqsClient } from "../../../messaging/infrastructure/sqs/sqs-client.factory";
 import { SqsDeadLetterPublisher } from "../../../messaging/infrastructure/sqs/sqs-dead-letter-publisher";
 import { SqsMessageAcknowledger } from "../../../messaging/infrastructure/sqs/sqs-message-acknowledger";
@@ -91,12 +92,21 @@ export class WagerTransactionsConsumerModule {
             logger: AppLogger,
             metrics: MetricsService,
             config: EnvConfig,
+            faults?: FaultInjector,
           ) =>
-            new WagerTransactionMessageHandler(useCase, acknowledger, deadLetters, logger, metrics, {
-              retryBaseSeconds: config.SQS_RETRY_BASE_SECONDS,
-              retryMaxSeconds: config.SQS_RETRY_MAX_SECONDS,
-              maxReceiveCount: config.SQS_MAX_RECEIVE_COUNT,
-            }),
+            new WagerTransactionMessageHandler(
+              useCase,
+              acknowledger,
+              deadLetters,
+              logger,
+              metrics,
+              {
+                retryBaseSeconds: config.SQS_RETRY_BASE_SECONDS,
+                retryMaxSeconds: config.SQS_RETRY_MAX_SECONDS,
+                maxReceiveCount: config.SQS_MAX_RECEIVE_COUNT,
+              },
+              faults,
+            ),
           inject: [
             SubmitWagerTransactionUseCase,
             MESSAGE_ACKNOWLEDGER_TOKEN,
@@ -104,6 +114,7 @@ export class WagerTransactionsConsumerModule {
             AppLogger,
             MetricsService,
             CONSUMER_CONFIG_TOKEN,
+            { token: FAULT_INJECTOR_TOKEN, optional: true },
           ],
         },
         {

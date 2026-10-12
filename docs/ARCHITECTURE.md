@@ -418,6 +418,15 @@ sequenceDiagram
   7. **Compose.** O serviço `app` usa `/health/live` no `healthcheck` (a imagem do Bun não tem `curl`, então a sonda é um `fetch` do próprio Bun). `/health/ready` é o alvo da readiness probe de um orquestrador (Kubernetes `readinessProbe`, target group de load balancer); não entra no healthcheck do Compose para que uma queda do banco não marque o contêiner como *unhealthy* e o reinicie.
 - **Consequências:** A sondagem de readiness custa uma conexão do pool e uma chamada SQS por requisição; com sondas a cada poucos segundos é desprezível, mas o pool de `DB_POOL_MAX` deve ter folga. Se o pool estiver esgotado por carga, `ready` fica 503 por prazo estourado, o que é o comportamento desejado (retirar a instância saturada da rotação). Não há cache do resultado: preferimos uma resposta fresca a uma que mascare uma queda por alguns segundos.
 
+### ADR 27: Testes com processos reais e pontos de falha injetáveis
+
+- **Contexto:** o README (§8, §11, §13) exige provar três instâncias simultâneas, a morte do processo entre o commit e o ack, entre a publicação e o commit da outbox, e o reinício com consistência final. Wrappers em processo (ADR 24, ADR 23) cobrem a lógica, mas não uma queda real: sem `SIGKILL` não há prova de que o Postgres solta os locks, de que o SQS reentrega e de que outra instância assume.
+- **Decisão:**
+  1. **Porta `FaultInjector` (`shared/application`).** O código de produção só enxerga `reach(point)`, com a implementação padrão `NoopFaultInjector` (uma chamada vazia). Os pontos são `after_commit_before_ack` (`WagerTransactionMessageHandler`, depois do `execute` e antes do `DeleteMessage`), `after_publish_before_commit` (`OutboxBatchPublisher`, depois de publicar ao menos um evento e antes de a transação do lote terminar) e `after_ledger_before_commit` (`WagerSettlementService`, depois de gravar o lançamento no ledger).
+  2. **Ativação restrita.** `createFaultInjector` só devolve algo diferente do no-op quando `NODE_ENV=test` **e** `FAULT_INJECTION="<ponto>=<ação>"` está definida. Fora de `test` a variável é ignorada por inteiro, então um valor esquecido num ambiente real não tem efeito. Ações: `crash` (toda vez que o ponto é alcançado) e `crash_once` (só a primeira vez entre os processos que compartilham `FAULT_INJECTION_MARKER`, um arquivo criado de forma atômica com `wx`; um processo que sobe depois não repete a falha). `crash` é `process.kill(process.pid, "SIGKILL")`: sem handlers, sem flush, sem ack, como uma queda real.
+  3. **Ligação.** `FaultInjectionModule` (global) entra só no `AppModule`; os consumidores o pedem como opcional (`@Optional()` / `optional: true`), então os módulos montados sem ele, como os dos testes de API, recebem o no-op. Os testes em processo podem passar uma implementação própria que lança em vez de matar.
+- **Consequências:** O custo em produção é uma chamada a um método vazio em três lugares fora do caminho quente de decisão. Os testes multiprocesso passam a poder matar a instância exatamente nos pontos em que a atomicidade e o at-least-once são postos à prova.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

@@ -4,6 +4,7 @@ import config from "../mikro-orm.config";
 import { HealthModule } from "./health/health.module";
 import { AuthModule } from "./auth/auth.module";
 import { MessagingModule } from "./messaging/messaging.module";
+import { FaultInjectionModule } from "./shared/infrastructure/fault-injection/fault-injection.module";
 import { ObservabilityModule } from "./shared/infrastructure/observability/observability.module";
 import { PersistenceModule } from "./shared/infrastructure/persistence/persistence.module";
 import { PresentationModule } from "./shared/presentation/presentation.module";
@@ -25,6 +26,7 @@ export class ApiModule {}
     MikroOrmModule.forRoot(config),
     PersistenceModule.forRoot(),
     ObservabilityModule.forRoot(),
+    FaultInjectionModule.forRoot(),
     MessagingModule.forRoot(),
     WagerTransactionsConsumerModule.forRoot(),
     HealthModule.forRoot(),

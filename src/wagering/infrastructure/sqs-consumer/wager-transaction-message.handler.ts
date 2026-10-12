@@ -1,3 +1,4 @@
+import { type FaultInjector, FaultPoint, NOOP_FAULT_INJECTOR } from "../../../shared/application/fault-injector.port";
 import type { DeadLetterPublisher } from "../../../messaging/application/dead-letter-publisher.port";
 import type { MessageAcknowledger } from "../../../messaging/application/message-acknowledger.port";
 import type { QueueMessage, QueueMessageHandler } from "../../../messaging/application/queue-message";
@@ -44,6 +45,7 @@ export class WagerTransactionMessageHandler implements QueueMessageHandler {
     private readonly logger: AppLogger,
     private readonly metrics: MetricsService,
     private readonly options: WagerTransactionMessageHandlerOptions,
+    private readonly faults: FaultInjector = NOOP_FAULT_INJECTOR,
   ) {}
 
   public handle(message: QueueMessage): Promise<void> {
@@ -52,6 +54,10 @@ export class WagerTransactionMessageHandler implements QueueMessageHandler {
         this.metrics.recordRetry("sqs", "redelivery");
       }
       const disposition = await this.process(message);
+      if (disposition.action === "ack") {
+        // Só em teste: efeito commitado, mensagem ainda sem DeleteMessage
+        this.faults.reach(FaultPoint.AfterCommitBeforeAck);
+      }
       await this.apply(message, disposition);
     });
   }

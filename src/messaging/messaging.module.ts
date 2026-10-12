@@ -1,5 +1,6 @@
 import { type DynamicModule, Module } from "@nestjs/common";
 import type { SQSClient } from "@aws-sdk/client-sqs";
+import { FAULT_INJECTOR_TOKEN, type FaultInjector } from "../shared/application/fault-injector.port";
 import { CLOCK_TOKEN, type Clock } from "../shared/application/clock.port";
 import { UNIT_OF_WORK_TOKEN, type UnitOfWork } from "../shared/application/unit-of-work.port";
 import { type EnvConfig, envSchema } from "../shared/infrastructure/config/env.config";
@@ -83,9 +84,10 @@ export class MessagingModule {
             metrics: MetricsService,
             logger: AppLogger,
             config: EnvConfig,
+            faults?: FaultInjector,
           ) =>
             new OutboxBatchPublisher(
-              { unitOfWork, outbox, publisher, clock, metrics, logger },
+              { unitOfWork, outbox, publisher, clock, metrics, logger, faults },
               { batchSize: config.OUTBOX_BATCH_SIZE },
             ),
           inject: [
@@ -96,6 +98,7 @@ export class MessagingModule {
             MetricsService,
             AppLogger,
             MESSAGING_CONFIG_TOKEN,
+            { token: FAULT_INJECTOR_TOKEN, optional: true },
           ],
         },
         {
