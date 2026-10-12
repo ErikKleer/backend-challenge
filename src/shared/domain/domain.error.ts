@@ -100,3 +100,36 @@ export class InvalidTransactionStateError extends DomainError {
     super(message);
   }
 }
+
+/**
+ * Lançado quando já existe uma wallet para o mesmo `playerId` e moeda.
+ */
+export class WalletAlreadyExistsError extends DomainError {
+  public readonly code = "WALLET_ALREADY_EXISTS";
+
+  constructor(playerId: string, currency: string) {
+    super(`A wallet already exists for player '${playerId}' in currency '${currency}'`);
+  }
+}
+
+/**
+ * Lançado quando a wallet consultada não existe.
+ */
+export class WalletNotFoundError extends DomainError {
+  public readonly code = "WALLET_NOT_FOUND";
+
+  constructor(walletId: string) {
+    super(`Wallet '${walletId}' was not found`);
+  }
+}
+
+/**
+ * Lançado quando a transação consultada não existe.
+ */
+export class TransactionNotFoundError extends DomainError {
+  public readonly code = "TRANSACTION_NOT_FOUND";
+
+  constructor(reference: string) {
+    super(`Transaction '${reference}' was not found`);
+  }
+}

@@ -202,6 +202,18 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
   3. **Desenho adotado quando houver autenticação:** integrar um IdP externo via OIDC (Keycloak ou Zitadel no Docker Compose), sem tabela própria de usuários. O guard real valida o token (assinatura por JWKS, expiração, audiência) através da porta e **exige que o `providerId` do token seja igual ao `providerId` do corpo**, para que um provedor não submeta transações em nome de outro; falha de token ⇒ 401, divergência ⇒ 403. O canal SQS continua confiável, mas a identidade do provedor na mensagem segue sujeita às validações de domínio.
 - **Consequências:** O custo de ligar a autenticação é implementar uma classe (guard) e uma implementação da porta. Enquanto isso, qualquer cliente que alcance a API pode submeter transações em nome de qualquer provedor; a API não deve ser exposta fora de rede confiável nesta configuração.
 
+### ADR 14: Camada HTTP compartilhada — validação, contrato de dinheiro e envelope de erro
+
+- **Contexto:** Todos os endpoints precisam validar a entrada do mesmo jeito, nunca aceitar dinheiro fora do contrato e responder falhas com um envelope único, sem vazar detalhes internos.
+- **Decisão:**
+  1. **Validação com zod** (`ZodValidationPipe`): devolve a *saída* do schema (por exemplo `Money`) e, em falha, lança `RequestValidationError` com uma entrada `{ path, message }` por campo. O erro vive na apresentação, não no domínio.
+  2. **`MoneyPropsSchema`** só confere os tipos (`amount` e `currency` string) e delega o formato a `Money.fromContract`, repassando a mensagem do domínio. A regra de dinheiro continua em um lugar só; o shape `number` nunca chega ao domínio.
+  3. **`AllExceptionsFilter`** (`APP_FILTER`) aplica o envelope `{ error: { code, message, details? }, correlationId }`: `RequestValidationError` e erros 4xx do framework (JSON malformado, corpo grande) ⇒ 400/4xx (`VALIDATION_ERROR` para 400, mensagem do parser omitida); `DomainError` ⇒ status da tabela `DOMAIN_ERROR_HTTP_STATUS` (`WALLET_ALREADY_EXISTS` 409, `WALLET_NOT_FOUND`/`TRANSACTION_NOT_FOUND` 404; os códigos de idempotência entram na tabela no prompt 09); `TransientInfrastructureError` ⇒ 503 `TRANSIENT_FAILURE` com `Retry-After`; o resto ⇒ 500 `INTERNAL_ERROR` genérico, com a causa somente no log.
+  4. **`DomainError` fora da tabela vira 500**, não 4xx: um código sem mapeamento indica falha de programação ou invariante violada, não erro do cliente. A mensagem original não é exposta.
+  5. **`correlationId` sempre presente.** Vem do contexto de execução; falhas do body-parser ocorrem antes do middleware de correlação, então o filtro gera um id novo e o devolve também no header `X-Correlation-Id`.
+  6. **Log do 500 sem SQL.** A mensagem de `InfrastructureError` carrega o SQL com seus parâmetros (inclusive valores monetários), então o filtro loga dele só o nome, o código e os frames da pilha; a política de não logar valores (ADR 12) vale também para falhas inesperadas.
+- **Consequências:** Cada endpoint novo só declara schema e códigos de erro. O custo é manter `DOMAIN_ERROR_HTTP_STATUS` sincronizada com os erros de domínio: um erro novo esquecido na tabela aparece como 500, o que os testes de cada endpoint pegam.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid
