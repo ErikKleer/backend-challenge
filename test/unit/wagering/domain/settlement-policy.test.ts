@@ -53,6 +53,7 @@ describe("SettlementPolicy (Table-driven domain policy)", () => {
   const createRef = (props: {
     kind: WagerTransactionKind;
     status: WagerTransactionStatus;
+    providerId?: string;
     amount?: string;
     currency?: string;
     playerId?: string;
@@ -61,7 +62,7 @@ describe("SettlementPolicy (Table-driven domain policy)", () => {
   }) => {
     return WagerTransaction.rehydrate({
       id: "tx-ref-1",
-      providerId: "provider-a",
+      providerId: props.providerId ?? "provider-a",
       externalTransactionId: "ext-ref-1",
       idempotencyKey: "key-ref",
       payloadHash: "hash-ref",
@@ -217,14 +218,24 @@ describe("SettlementPolicy (Table-driven domain policy)", () => {
       ).toEqual({ type: "REJECT", code: FailureCode.ReferenceNotProcessed });
     });
 
-    it("should REJECT REFERENCE_MISMATCH when player, wallet, currency or round differs", () => {
+    it("should REJECT REFERENCE_MISMATCH when provider, player, wallet, currency or round differs", () => {
       const wallet = createWallet();
       const refundTx = createTx({
         kind: WagerTransactionKind.Refund,
         referenceExternalTransactionId: "ext-ref-1",
       });
 
-      // Doutor player
+      // Outro provider
+      const refProviderMismatch = createRef({
+        kind: WagerTransactionKind.Bet,
+        status: WagerTransactionStatus.Processed,
+        providerId: "another-provider",
+      });
+      expect(
+        SettlementPolicy.decide({ transaction: refundTx, wallet, reference: refProviderMismatch }),
+      ).toEqual({ type: "REJECT", code: FailureCode.ReferenceMismatch });
+
+      // Outro player
       const refPlayerMismatch = createRef({
         kind: WagerTransactionKind.Bet,
         status: WagerTransactionStatus.Processed,

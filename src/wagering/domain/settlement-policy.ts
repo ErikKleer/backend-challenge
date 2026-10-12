@@ -96,6 +96,7 @@ export class SettlementPolicy {
     }
 
     if (
+      reference.providerId !== transaction.providerId ||
       reference.playerId !== transaction.playerId ||
       reference.walletId !== transaction.walletId ||
       reference.money.currency !== transaction.money.currency ||
