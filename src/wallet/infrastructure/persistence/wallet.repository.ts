@@ -43,6 +43,13 @@ export class MikroOrmWalletRepository implements WalletRepository {
     }
   }
 
+  /**
+   * Lock de escrita na linha da wallet. Usa `FOR NO KEY UPDATE` (e não `FOR UPDATE`):
+   * o `UPDATE` de saldo/versão não toca a chave, então esse modo basta para serializar
+   * os escritores, e ele não conflita com o `FOR KEY SHARE` que o `INSERT` de uma
+   * transação (FK para `wallets`) toma antes. Com `FOR UPDATE`, duas requisições da mesma
+   * wallet que já inseriram a transação entram em deadlock ao pedir o lock.
+   */
   public async findByIdForUpdate(id: string): Promise<Wallet | null> {
     try {
       // Garante que o lock_timeout da sessão local esteja ativo mesmo se invocado diretamente
@@ -54,7 +61,7 @@ export class MikroOrmWalletRepository implements WalletRepository {
         `SELECT id, player_id as "playerId", currency, balance, version, created_at as "createdAt", updated_at as "updatedAt"
          FROM wallets
          WHERE id = ?
-         FOR UPDATE`,
+         FOR NO KEY UPDATE`,
         [id],
       );
 

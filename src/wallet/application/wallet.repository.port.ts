@@ -8,7 +8,7 @@ export interface WalletRepository {
   findById(id: string): Promise<Wallet | null>;
 
   /**
-   * Busca a carteira por identificador aplicando lock pessimista de linha (FOR UPDATE).
+   * Busca a carteira por identificador aplicando lock pessimista de linha (FOR NO KEY UPDATE).
    * Deve ser executado dentro de uma transação ativa com lock_timeout configurado.
    * Retorna null se não encontrada.
    */

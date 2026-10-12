@@ -120,7 +120,7 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
      - Timeout de aquisição de lock (`SET LOCAL lock_timeout = '...ms'`) é configurado automaticamente na abertura de cada transação (usando `DB_LOCK_TIMEOUT_MS`).
      - Callbacks de pós-commit (`afterCommit(fn)`) são disparados exclusivamente após o commit bem-sucedido da transação raiz.
   3. **SQL Cru nos Caminhos Críticos de Concorrência e Auditoria:**
-     - As operações de alta semântica contábil e de concorrência (`SELECT ... FOR UPDATE`, `INSERT ... ON CONFLICT DO NOTHING`, `UPDATE ... WHERE version = ?`, `INSERT` imutável no ledger) são executadas através de SQL cru parametrizado (`em.execute`) sobre a conexão transacional ativa, evitando o mecanismo automático de dirty checking (`persist/flush`) do ORM nesses caminhos sensíveis.
+     - As operações de alta semântica contábil e de concorrência (`SELECT ... FOR NO KEY UPDATE` na wallet, `INSERT ... ON CONFLICT DO NOTHING`, `UPDATE ... WHERE version = ?`, `INSERT` imutável no ledger) são executadas através de SQL cru parametrizado (`em.execute`) sobre a conexão transacional ativa, evitando o mecanismo automático de dirty checking (`persist/flush`) do ORM nesses caminhos sensíveis.
      - A interface `LedgerRepository` expõe unicamente o método `append(entry)`. Não existem métodos de alteração (`update`) ou exclusão (`delete`), em perfeita consonância com as triggers do banco.
   4. **Classificação e Normalização de Erros do PostgreSQL:**
      - Erros de lock timeout (`55P03`) são convertidos em `LockTimeoutError` (transitório).
