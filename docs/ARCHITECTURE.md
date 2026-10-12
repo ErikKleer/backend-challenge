@@ -151,6 +151,14 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
   4. **`aggregateId = walletId`** em todos os eventos. É o `MessageGroupId` do FIFO: eventos da mesma wallet são ordenados entre si no broker; wallets distintas progridem em paralelo.
 - **Consequências:** Eventos reaplicáveis sem efeito colateral e payload auditável e versionável. Para mudar o formato de um evento, incrementa-se `version` (o tipo e a versão andam juntos).
 
+### ADR 10: Outbox e Inbox (domínio)
+
+- **Contexto:** O evento confirmado não pode ser perdido nem publicado antes do commit (README §5.4), e o consumo SQS precisa de deduplicação persistente.
+- **Decisão:**
+  1. **`OutboxMessage`:** nasce de `enqueue(event)` com `id = eventId` e `payload = event.toJSON()`. `isDue(now)` usa a mesma expressão do índice de claim, `COALESCE(nextAttemptAt, occurredAt) <= now`. `scheduleRetry(now, policy)` incrementa `attempts` e agenda com backoff exponencial `min(60s, 1s * 2^(n-1))`, **sem jitter** para manter os testes determinísticos; a política é injetável. **Não há limite de tentativas**: um evento já confirmado não pode ser descartado, então a falha persistente aparece como defasagem (`outbox_lag_seconds`, prompt 11), não como perda. Publicar ou reagendar uma mensagem já publicada lança `InvalidMessageStateError`.
+  2. **`InboxMessage`:** identidade `(consumerName, messageId)` com `payloadHash` (SHA-256 hex) para detectar o mesmo `messageId` reentregue com conteúdo diferente. `markProcessed` só uma vez.
+- **Consequências:** O reagendamento é puro e testável sem relógio real. Detalhes dos repositórios (claim com `SKIP LOCKED`) ficam no ADR 11.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

@@ -80,6 +80,17 @@ export class InvalidIntegrationEventError extends DomainError {
 }
 
 /**
+ * Lançado quando uma mensagem de inbox/outbox é criada ou transicionada de forma inválida.
+ */
+export class InvalidMessageStateError extends DomainError {
+  public readonly code = "INVALID_MESSAGE_STATE";
+
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
  * Lançado quando ocorre uma transição ou operação inválida de estado em WagerTransaction.
  */
 export class InvalidTransactionStateError extends DomainError {
