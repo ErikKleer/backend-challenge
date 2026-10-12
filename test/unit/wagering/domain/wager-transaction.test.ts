@@ -63,6 +63,31 @@ describe("WagerTransaction Aggregate and State Machine", () => {
         }).toThrow(InvalidTransactionStateError);
       }
     });
+    it("should reject creation when text fields exceed maximum length limits", () => {
+      const fieldsUpTo128 = ["providerId", "playerId", "roundId", "gameId"] as const;
+      for (const field of fieldsUpTo128) {
+        expect(() => {
+          WagerTransaction.create(createValidProps({ [field]: "a".repeat(129) }));
+        }).toThrow(InvalidTransactionStateError);
+      }
+
+      const fieldsUpTo255 = ["externalTransactionId", "idempotencyKey"] as const;
+      for (const field of fieldsUpTo255) {
+        expect(() => {
+          WagerTransaction.create(createValidProps({ [field]: "b".repeat(256) }));
+        }).toThrow(InvalidTransactionStateError);
+      }
+
+      expect(() => {
+        WagerTransaction.create(
+          createValidProps({
+            kind: WagerTransactionKind.Refund,
+            referenceExternalTransactionId: "c".repeat(256),
+          }),
+        );
+      }).toThrow(InvalidTransactionStateError);
+    });
+
 
     it("should require referenceExternalTransactionId for REFUND and ROLLBACK", () => {
       expect(() => {

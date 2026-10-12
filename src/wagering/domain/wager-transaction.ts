@@ -74,14 +74,14 @@ export class WagerTransaction {
     if (!props.id || typeof props.id !== "string") {
       throw new InvalidTransactionStateError("Transaction id must be a non-empty string");
     }
-    if (!props.providerId || typeof props.providerId !== "string") {
-      throw new InvalidTransactionStateError("Transaction providerId must be a non-empty string");
+    if (!props.providerId || typeof props.providerId !== "string" || props.providerId.length > 128) {
+      throw new InvalidTransactionStateError("Transaction providerId must be a non-empty string with up to 128 characters");
     }
-    if (!props.externalTransactionId || typeof props.externalTransactionId !== "string") {
-      throw new InvalidTransactionStateError("Transaction externalTransactionId must be a non-empty string");
+    if (!props.externalTransactionId || typeof props.externalTransactionId !== "string" || props.externalTransactionId.length > 255) {
+      throw new InvalidTransactionStateError("Transaction externalTransactionId must be a non-empty string with up to 255 characters");
     }
-    if (!props.idempotencyKey || typeof props.idempotencyKey !== "string") {
-      throw new InvalidTransactionStateError("Transaction idempotencyKey must be a non-empty string");
+    if (!props.idempotencyKey || typeof props.idempotencyKey !== "string" || props.idempotencyKey.length > 255) {
+      throw new InvalidTransactionStateError("Transaction idempotencyKey must be a non-empty string with up to 255 characters");
     }
     if (!props.payloadHash || typeof props.payloadHash !== "string") {
       throw new InvalidTransactionStateError("Transaction payloadHash must be a non-empty string");
@@ -89,14 +89,14 @@ export class WagerTransaction {
     if (!props.walletId || typeof props.walletId !== "string") {
       throw new InvalidTransactionStateError("Transaction walletId must be a non-empty string");
     }
-    if (!props.playerId || typeof props.playerId !== "string") {
-      throw new InvalidTransactionStateError("Transaction playerId must be a non-empty string");
+    if (!props.playerId || typeof props.playerId !== "string" || props.playerId.length > 128) {
+      throw new InvalidTransactionStateError("Transaction playerId must be a non-empty string with up to 128 characters");
     }
-    if (!props.roundId || typeof props.roundId !== "string") {
-      throw new InvalidTransactionStateError("Transaction roundId must be a non-empty string");
+    if (!props.roundId || typeof props.roundId !== "string" || props.roundId.length > 128) {
+      throw new InvalidTransactionStateError("Transaction roundId must be a non-empty string with up to 128 characters");
     }
-    if (!props.gameId || typeof props.gameId !== "string") {
-      throw new InvalidTransactionStateError("Transaction gameId must be a non-empty string");
+    if (!props.gameId || typeof props.gameId !== "string" || props.gameId.length > 128) {
+      throw new InvalidTransactionStateError("Transaction gameId must be a non-empty string with up to 128 characters");
     }
 
     const requiresRef =
@@ -105,6 +105,11 @@ export class WagerTransaction {
     if (requiresRef && (!props.referenceExternalTransactionId || typeof props.referenceExternalTransactionId !== "string")) {
       throw new InvalidTransactionStateError(
         `Transaction kind '${props.kind}' requires referenceExternalTransactionId`,
+      );
+    }
+    if (props.referenceExternalTransactionId !== undefined && props.referenceExternalTransactionId.length > 255) {
+      throw new InvalidTransactionStateError(
+        "Transaction referenceExternalTransactionId cannot exceed 255 characters",
       );
     }
 
