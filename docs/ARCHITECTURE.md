@@ -2,7 +2,75 @@
 
 ## Visão Geral
 
-Serviço financeiro distribuído de alta concorrência para processamento de apostas.
+Serviço financeiro distribuído que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) de múltiplos provedores por **HTTP** e por **SQS**, mantendo o saldo de cada wallet consistente com um **ledger imutável**. O sistema permanece correto com mensagens duplicadas, fora de ordem, processadas simultaneamente por várias instâncias, e com quedas de processo em qualquer ponto.
+
+Três ideias sustentam o desenho:
+
+1. **O banco é o árbitro.** Unicidade (idempotência, uma wallet por jogador/moeda, uma reversão por transação), imutabilidade (ledger e transações terminais) e não-negatividade do saldo são `UNIQUE`, `CHECK` e *triggers* do PostgreSQL. O código de aplicação as respeita, mas não é a única barreira (ADR 7).
+2. **Uma transação SQL por efeito financeiro.** Inbox, transação, saldo, ledger e outbox são confirmados juntos ou não são (ADR 16, 17, 24). Nada é publicado antes do commit: a publicação é um processo à parte que lê a outbox já confirmada (ADR 23).
+3. **A unidade de concorrência é a wallet.** Lock pessimista por linha (`FOR NO KEY UPDATE`), com a versão e o `CHECK` como guardas adicionais. Não existe lock global, e instâncias distintas coordenam-se apenas pelo PostgreSQL (ADR 16).
+
+### Componentes
+
+```mermaid
+flowchart LR
+    subgraph Clientes
+        P[Provedores]
+    end
+    subgraph Instancia["Instância da aplicação (N cópias, sem estado)"]
+        direction TB
+        API["API HTTP (Nest)<br/>wallets · wagering · health · metrics"]
+        UC["SubmitWagerTransaction<br/>(mesmo caso de uso para HTTP e SQS)"]
+        SET["WagerSettlementService<br/>SettlementPolicy + Wallet + Ledger"]
+        CONS["Consumidor SQS<br/>poller + handler"]
+        PEND["Worker de PENDING_REFERENCE"]
+        PUB["Publisher da outbox"]
+        API --> UC
+        CONS --> UC
+        UC --> SET
+        PEND --> SET
+    end
+    subgraph PG["PostgreSQL"]
+        T[(wallets<br/>wager_transactions<br/>wallet_ledger_entries)]
+        IO[(inbox_messages<br/>outbox_messages)]
+    end
+    subgraph SQS["SQS (LocalStack)"]
+        QIN[[wager-transactions.fifo]]
+        DLQ[[wager-transactions-dlq.fifo]]
+        QOUT[[wager-events.fifo]]
+    end
+    P -->|"POST /wagering/transactions<br/>Idempotency-Key"| API
+    P -->|mensagem| QIN
+    QIN --> CONS
+    CONS -.->|falha permanente| DLQ
+    SET -->|"uma transação SQL"| T
+    UC -->|"mesma transação"| IO
+    PUB -->|"claim SKIP LOCKED"| IO
+    PUB --> QOUT
+    QOUT -->|"eventos at-least-once"| P
+```
+
+Fluxo de uma aposta: a requisição (HTTP ou mensagem) chega ao caso de uso; dentro de **uma** transação ele grava a inbox (SQS), insere a transação de forma idempotente, trava a wallet, decide, altera o saldo, acrescenta o lançamento ao ledger, atualiza o estado final e enfileira os eventos na outbox. Só depois do commit a mensagem SQS é confirmada (`ack`) e o publisher entrega os eventos ao `wager-events.fifo`. O diagrama de sequência está no ADR 16.
+
+Camadas por módulo (`wallet`, `wagering`, `messaging`, `shared`): `domain` (puro, sem Nest nem ORM) → `application` (casos de uso e portas `*.port.ts`) → `infrastructure` (MikroORM, SQS, workers) e `presentation` (controllers, validação, filtro de erros). O domínio é construído por *factories* estáticas (`create`, `from`, `rehydrate`) e expõe o estado por getters; a reidratação não revalida transições (ADR 1).
+
+### Onde encontrar cada tema
+
+| Tema | Onde |
+|---|---|
+| Modelo de dados (ER) e garantia ⇒ mecanismo no schema | ADR 7; [Modelo de Dados](#modelo-de-dados-diagrama-er) e [Mapeamento](#mapeamento-garantia-contábilconcorrência--mecanismo-no-schema) |
+| Concorrência, alternativas e trade-offs | ADR 16 (itens 3–5) e [Estratégia de concorrência](#estratégia-de-concorrência-e-trade-offs) |
+| Idempotência e algoritmo do `payloadHash` | ADR 6 (item 4), ADR 16 e [Idempotência](#idempotência-em-resumo) |
+| Máquina de estados | ADR 6 (item 1) |
+| Taxonomia de `FailureCode` e ação ao provedor | ADR 6 (item 2) |
+| Mapeamento HTTP | ADR 18 (item 4) |
+| Inbox, outbox, DLQ e garantias (*at-least-once*, dedup, ordem) | ADR 10, 11, 23, 24 e [Garantias de mensageria](#garantias-de-mensageria) |
+| `PENDING_REFERENCE`: parâmetros e justificativa | ADR 25 |
+| Observabilidade (campos de log, métricas, health) | ADR 12, 26 |
+| Autenticação (não implementada: desenho e ponto de extensão) | ADR 13 |
+| Testes com processos reais e falhas injetadas | ADR 22, 27 |
+| Interpretações adotadas | [Interpretações adotadas](#interpretações-adotadas) |
+| Limitações e próximos passos | [Limitações conhecidas](#limitações-conhecidas-e-o-que-seria-feito-com-mais-tempo) |
 
 ## Decisões (ADRs)
 
@@ -542,4 +610,98 @@ erDiagram
 | Proibição de truncamento acidental do ledger | Trigger `BEFORE TRUNCATE` (statement-level) | `wallet_ledger_entries` |
 | Deduplicação de consumo assíncrono (Inbox) | `PRIMARY KEY (consumer_name, message_id)` | `inbox_messages` |
 | Claim eficiente de eventos pendentes (Outbox) | `CREATE INDEX ... (COALESCE(next_attempt_at, occurred_at)) WHERE published_at IS NULL` | `outbox_messages` |
+
+## Estratégia de concorrência e trade-offs
+
+A unidade de concorrência é a `walletId`. A decisão está no ADR 16; aqui ficam as alternativas lado a lado.
+
+| Alternativa | Como funciona | Por que não (ou por que sim) |
+|---|---|---|
+| **Lock pessimista por wallet** (adotada) | `SELECT … FOR NO KEY UPDATE` na linha da wallet, `lock_timeout` curto, `UPDATE … WHERE version = ?` e `CHECK (balance >= 0)` como guardas | Serializa só as transações da mesma wallet; a decisão (saldo, referência, reversão existente) é tomada sobre dados estáveis; sob disputa o resultado depende só das regras de negócio. Custo: uma wallet muito disputada vira fila, e a espera é limitada pelo `lock_timeout` (excedeu ⇒ 503 explícito, repetível) |
+| Optimistic locking com retry | lê, calcula, `UPDATE … WHERE version = ?` e repete se perdeu | Sob disputa na mesma wallet quase todas as tentativas perdem; o retry multiplica leituras e a ordem de chegada fica dependente de sorte. Mantido apenas como segunda guarda |
+| Update atômico condicionado | `UPDATE … SET balance = balance - x WHERE balance >= x` | Resolve só a `BET` simples. Reversões dependem da transação referenciada e da inexistência de outra reversão, e a rejeição precisa gravar o saldo observado, o que exige leitura sob lock de qualquer forma |
+| Lock global / fila única | um mutex ou partição única para todos | Proibido (§5.6) e elimina o paralelismo entre wallets |
+| Lock distribuído fora do banco (Redis etc.) | exclusão mútua por wallet em outro serviço | Mais um ponto de falha e uma segunda fonte de verdade; o PostgreSQL já oferece o lock correto, atômico com a mudança de saldo |
+| Isolamento `SERIALIZABLE` | o banco aborta transações conflitantes | Abortos frequentes em hot wallet e retry em toda a aplicação; o escopo do conflito é maior que a wallet |
+
+**Defesa em camadas (nenhuma depende de memória do processo, então vale com N instâncias):** (1) o lock da wallet impede a disputa; (2) `UPDATE … WHERE version = ?` detecta qualquer escrita que escape do lock; (3) `CHECK (balance >= 0)` impede o saldo negativo mesmo se (1) e (2) falharem; (4) `UNIQUE (wallet_id, wallet_version)` no ledger impede dois lançamentos para a mesma versão.
+
+**Lock ordering.** Submissão: trava a wallet. Worker de pendentes: trava a linha da transação (`SKIP LOCKED`) e depois a wallet. A submissão nunca espera por uma linha de transação existente, então não há ciclo (ADR 25, item 5). `FOR NO KEY UPDATE` em vez de `FOR UPDATE` evita o deadlock com o `FOR KEY SHARE` que a FK da transação toma na wallet (ADR 16, item 4).
+
+## Idempotência em resumo
+
+1. A chave é o header `Idempotency-Key` (HTTP) ou `data.idempotencyKey` (SQS). Ela nunca entra no hash.
+2. `payloadHash` = SHA-256 hex do JSON canônico (chaves ordenadas recursivamente, sem espaços, `null`/`undefined` omitidos, `Money` como `{amount, currency}`) de `providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money` e `referenceExternalTransactionId` (quando presente). Detalhes no ADR 6, item 4.
+3. Dentro da transação SQL: `INSERT … ON CONFLICT DO NOTHING` da transação `PENDING`. Se gravou, esta chamada é a dona do efeito. Se não gravou, a transação existente é lida (por chave ou por `(provider, external id)`):
+
+| Situação | Resultado |
+|---|---|
+| mesma chave, mesmo `payloadHash` | **replay**: resposta original com o saldo observado e `idempotentReplay: true` (200/202/422 conforme o estado) |
+| mesma chave, `payloadHash` diferente | **conflito** (409), nunca replay |
+| mesmo `(provider, external id)` sob outra chave | **conflito** (409) |
+| mesmo `external id` em outro provedor | transações independentes |
+
+4. A decisão sai do índice único do banco, não de uma leitura prévia: 50 requisições idênticas simultâneas produzem um débito e 49 replays (`same-bet-in-parallel.test.ts`). Não há cache em memória na decisão; um replay nunca disputa o lock da wallet.
+5. Para SQS há ainda a inbox `(consumer_name, message_id)`: o mesmo `messageId` com o mesmo conteúdo é redelivery; com conteúdo diferente é erro permanente (DLQ).
+
+## Garantias de mensageria
+
+| Garantia | Como é obtida | Onde |
+|---|---|---|
+| Nenhum evento antes do commit | a outbox é gravada na transação financeira; o publisher só enxerga linhas confirmadas | ADR 17, 23 |
+| Nenhum evento confirmado se perde | linha só é marcada publicada depois do envio; crash antes do commit do lote a deixa pendente; sem limite de tentativas | ADR 23 |
+| *At-least-once* na saída | duplicata possível após crash ou timeout ambíguo; `eventId` determinístico = `MessageDeduplicationId` e chave de deduplicação do consumidor | ADR 9, 23 |
+| *At-least-once* na entrada, efeito único | inbox persistente + idempotência da transação; `DeleteMessage` só depois do commit | ADR 24 |
+| Deduplicação | `eventId` (saída), `(consumer_name, message_id)` e `Idempotency-Key` (entrada). A janela de 5 min do FIFO é só otimização | ADR 9, 24 |
+| Ordem | **por wallet no broker** (`MessageGroupId = walletId`) e best-effort com vários publishers; o consumidor ordena e descarta duplicatas por `walletVersion`. A correção financeira não depende de ordem: referência fora de ordem vira `PENDING_REFERENCE` | ADR 11, 24, 25 |
+| Falha permanente não bloqueia a fila | DLQ explícita (corpo original + causa nos atributos) e `maxReceiveCount` como rede de segurança | ADR 24 |
+| Desligamento sem perda | `SIGTERM` conclui o que está em andamento e devolve a visibilidade do resto | ADR 24 |
+
+## Interpretações adotadas
+
+O enunciado deixa pontos em aberto; em cada um escolheu-se a leitura financeiramente mais segura e ela está registrada aqui.
+
+1. **Saldo inicial.** Maior que zero gera uma transação interna `OPENING` (`providerId = "internal"`) com lançamento `CREDIT`, na criação. Com zero, só a wallet (ADR 15).
+2. **Reversão única por qualquer tipo.** O enunciado (§7, regra 4) fala em "mesmo tipo de operação"; adotou-se a regra mais restritiva: uma transação só pode ser revertida **uma vez por qualquer** `REFUND`/`ROLLBACK`, garantida por índice único parcial. Reverter duas vezes, por tipos diferentes, creditaria duas vezes o mesmo valor.
+3. **Tipos de referência.** `REFUND` referencia só `BET`; `ROLLBACK` referencia `BET`, `WIN` ou `REFUND` (um `ROLLBACK` não é revertido); `WIN`/`LOSS` aceitam referência opcional, que deve ser uma `BET` da mesma rodada, wallet, jogador, provedor e moeda (ADR 6, item 3).
+4. **Reversão exata.** O valor deve ser igual ao da referência; reversão parcial está fora de escopo (`REFERENCE_AMOUNT_MISMATCH`).
+5. **Rejeição é definitiva e auditável.** `REJECTED` não toca saldo nem ledger, grava o saldo observado e não é reaberta: reenviar a mesma chave devolve o mesmo 422; o provedor que queira reaplicar envia outra operação.
+6. **Referência ainda pendente.** Se a referência está `PENDING`/`PENDING_REFERENCE`, a dependente também espera. Esgotadas as tentativas: `REJECTED`/`REFERENCE_NOT_FOUND` (ADR 25). Referência `REJECTED`/`FAILED` rejeita a dependente com `REFERENCE_NOT_PROCESSED`.
+7. **Replay devolve o saldo observado**, não o corrente. Vale também para as consultas de transação (ADR 20).
+8. **Mesmo `(provider, external id)` sob outra chave** é conflito de idempotência, mesmo que o payload seja idêntico: a identidade do provedor é única.
+9. **`LOSS`** é registrada (`PROCESSED`, evento `WagerTransactionProcessed`) sem lançamento, sem alterar saldo nem `version`, e não emite `WalletBalanceChanged`.
+10. **Status HTTP.** Rejeição de negócio é 422 e `PENDING_REFERENCE` é 202 (ADR 18). Reconciliação com divergência responde 200 com `consistent: false`: a conferência foi feita e o resultado é o dado (ADR 21).
+11. **Moeda.** O modelo é multi-moeda (wallet única por jogador e moeda, conflito de moeda testado); a execução e os exemplos usam `BRL`.
+12. **Identificadores.** UUID v7 para `walletId` e `transactionId`; `playerId` é texto livre (o enunciado mostra UUID, mas o provedor é a fonte do identificador).
+13. **Autenticação.** Não implementada, com ponto de extensão explícito (ADR 13).
+
+## Limitações conhecidas e o que seria feito com mais tempo
+
+**Limitações do que existe hoje**
+
+- **Ordem de publicação.** Com vários publishers a ordem por agregado não é garantida (ADR 11, 23). O consumidor precisa ordenar por `walletVersion`.
+- **Transação aberta durante o envio ao SQS.** O publisher segura o lock do lote enquanto chama o broker (lote de 10, timeout curto; ADR 23). Um estado intermediário com *lease* removeria isso.
+- **Outbox e inbox crescem sem limite.** Não há purga nem particionamento de linhas já publicadas ou processadas.
+- **Hot wallet é serial por desenho.** O teto de vazão de uma única wallet é o de uma transação curta por vez; a defesa é o `lock_timeout` (503) e não escalar horizontalmente a mesma wallet.
+- **Worker de pendentes para no primeiro erro do ciclo** (ADR 25). Defeito permanente num item atrasaria os seguintes; as falhas esperadas são transitórias.
+- **Consumidor SQS sem circuit breaker.** Com o banco fora, cada mensagem falha e espera a própria visibilidade (ADR 24).
+- **Readiness sem cache** e custo de uma conexão do pool por sondagem (ADR 26).
+- **Reconciliação sob demanda.** Não há job periódico nem alerta automático; a divergência vira log de erro e métrica (ADR 21).
+- **Não há trigger diferido ligando `wallets.balance` ao último lançamento** (avaliada e recusada pelo custo em hot wallets, ADR 7). A invariante é garantida pela aplicação, pelo `version` e pelo `CHECK`, e verificada pela reconciliação.
+- **`ENABLE_HTTP`** é lida e validada, mas nenhum código a consome: a API HTTP sempre sobe. Os outros três papéis respeitam suas flags.
+- **Autenticação** ausente: a API aceita qualquer chamador (ADR 13). Não expor fora de rede confiável.
+- **Cursor do ledger não assinado** (ADR 19) e **segredos de exemplo** (`dummy`) no Compose e no `.env.example`; um deploy real usaria um gerenciador de segredos.
+- **Windows:** `SIGTERM` e `SIGKILL` se equivalem nos testes multiprocesso (ADR 27).
+- **Teste de carga** (`bun run test:load`) não foi feito.
+
+**Com mais tempo**
+
+1. **Partidas dobradas** (*double-entry*): contas de sistema (casa, jogador, bônus), duas pernas por transação e invariante de soma zero.
+2. **OpenTelemetry** com traces ligando HTTP/SQS ⇒ transação ⇒ outbox ⇒ publicação, e dashboard das métricas existentes.
+3. **Teste de carga** com metodologia registrada (ambiente, p50/p95/p99, taxa de erro, conflitos de lock, `outbox_lag_seconds`).
+4. **Autenticação real** via OIDC (Keycloak ou Zitadel) usando o `ProviderIdentityPort`, exigindo `providerId` do token igual ao do corpo.
+5. **Ordenação por agregado entre publishers**: *lease* por `aggregateId` ou particionamento da outbox por hash do agregado, para um publisher por partição.
+6. **Retenção e arquivamento** da outbox e da inbox, e reconciliação periódica com alerta.
+7. **Circuit breaker** no consumidor e lote com tolerância a item defeituoso no worker de pendentes.
+8. **Reversão parcial** e `ROLLBACK` encadeado, caso o negócio peça.
 
