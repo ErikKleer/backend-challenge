@@ -329,6 +329,17 @@ sequenceDiagram
   4. **Como testar a divergência:** o ledger é imutável por trigger, então o teste altera `wallets.balance` por SQL direto (a wallet não tem trigger sobre `balance`; só o `CHECK balance >= 0`) e verifica que a reconciliação acusa a diferença e que o saldo adulterado continua como está.
 - **Consequências:** A rota é segura para ser chamada com a carga em andamento e é idempotente. Ela é uma checagem sob demanda, não um corretor: a reação a `consistent: false` (alerta, investigação) é operacional.
 
+### ADR 22: Estratégia dos testes de concorrência
+
+- **Contexto:** A correção sob concorrência (README §8 e §13, itens 1–3) só se prova com PostgreSQL real e paralelismo real; sequências "paralelas" que na verdade rodam em fila, ou `sleep` para alinhar disparos, dariam falsa segurança e testes instáveis.
+- **Decisão:**
+  1. **Barreira de início** (`runInParallel`): todas as tarefas são criadas e ficam paradas num portão até a última chegar; só então disparam juntas. Espera por condição usa `waitFor` (polling com timeout), nunca `sleep` fixo.
+  2. **Pool dimensionado:** o teto do pool limita as transações simultâneas, então a suíte usa `poolMax: 30` (`createTestDatabase({ poolMax })`) para que dezenas de transações disputem o lock de verdade. Isso exigiu fazer `DB_POOL_MAX` valer de fato em `mikro-orm.config.ts` (a variável existia, mas não chegava ao driver).
+  3. **Cenários:** (a) mesma aposta 50× em paralelo, pelo caso de uso e pelo HTTP real: um original, 49 replays com o mesmo `transactionId` e saldo observado, um débito e um par de eventos na outbox; (b) cenário obrigatório §8 repetido 20× com wallets novas, seguido de retry em paralelo (tudo replay, nada duplica); (c) hot wallet, 150 apostas de `1.00` sobre `100.00` ⇒ exatamente 100 `PROCESSED` e 50 `INSUFFICIENT_FUNDS`, saldo `0.00`, cada saldo observado único; (d) 20 wallets × 10 apostas ⇒ invariantes por wallet e nenhum erro de lock.
+  4. **Invariantes finais em todo teste** (`assertWalletInvariants`): saldo igual à soma do ledger, último `balance_after` igual ao saldo, e versões do ledger exatamente `1..N` sem lacuna, com `N = wallet.version`.
+  5. **Falha de infraestrutura quebra o teste:** `runInParallel` rejeita na primeira exceção. Um 503/lock timeout inesperado é um achado, não algo a mascarar com retry.
+- **Consequências:** Os testes são determinísticos nos números (100/50, 5/5, 1 débito) porque a regra de negócio decide o resultado, não a ordem de chegada; só **quem** vence varia. A estabilidade foi verificada com 5 execuções consecutivas da suíte. Os itens 4–8 do README §13 (múltiplas instâncias, morte do worker, publishers, reinício) pertencem aos prompts de mensageria.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid
