@@ -6,6 +6,7 @@ import { MessagingModule } from "./messaging/messaging.module";
 import { ObservabilityModule } from "./shared/infrastructure/observability/observability.module";
 import { PersistenceModule } from "./shared/infrastructure/persistence/persistence.module";
 import { PresentationModule } from "./shared/presentation/presentation.module";
+import { WagerTransactionsConsumerModule } from "./wagering/infrastructure/sqs-consumer/wager-transactions-consumer.module";
 import { WageringModule } from "./wagering/wagering.module";
 import { WalletModule } from "./wallet/wallet.module";
 
@@ -24,6 +25,7 @@ export class ApiModule {}
     PersistenceModule.forRoot(),
     ObservabilityModule.forRoot(),
     MessagingModule.forRoot(),
+    WagerTransactionsConsumerModule.forRoot(),
     ApiModule,
   ],
 })

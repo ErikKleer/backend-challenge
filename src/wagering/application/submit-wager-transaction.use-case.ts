@@ -6,6 +6,7 @@ import { ID_GENERATOR_TOKEN, type IdGenerator } from "../../shared/application/i
 import { UNIT_OF_WORK_TOKEN, type UnitOfWork } from "../../shared/application/unit-of-work.port";
 import {
   IdempotencyConflictError,
+  InboxPayloadMismatchError,
   InvalidTransactionStateError,
   WalletNotFoundError,
 } from "../../shared/domain/domain.error";
@@ -106,6 +107,11 @@ export class SubmitWagerTransactionUseCase {
       : undefined;
     if (inboxMessage && !(await this.inbox.tryReceive(inboxMessage))) {
       // Mensagem já recebida: o efeito já foi (ou está sendo) gravado, devolve-o sem reprocessar.
+      // O mesmo messageId só é redelivery se o conteúdo for o mesmo
+      const received = await this.inbox.find(inboxMessage.consumerName, inboxMessage.messageId);
+      if (received && received.payloadHash !== inboxMessage.payloadHash) {
+        throw new InboxPayloadMismatchError(inboxMessage.consumerName, inboxMessage.messageId);
+      }
       const recorded = await this.transactions.findByIdempotencyKey(command.idempotencyKey);
       if (recorded) {
         return this.replay(recorded, payloadHash, command, source, stopTimer);
@@ -133,7 +139,13 @@ export class SubmitWagerTransactionUseCase {
     });
 
     if (!(await this.transactions.insertIfAbsent(transaction))) {
-      return this.replayExisting(command, payloadHash, source, stopTimer);
+      // Outro messageId (ou o HTTP) já gravou esta operação: a mensagem nova também está tratada
+      const replayed = await this.replayExisting(command, payloadHash, source, stopTimer);
+      if (inboxMessage) {
+        inboxMessage.markProcessed(now);
+        await this.inbox.markProcessed(inboxMessage);
+      }
+      return replayed;
     }
     bindContext({ transactionId: transaction.id });
 

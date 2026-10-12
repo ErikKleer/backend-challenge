@@ -145,3 +145,16 @@ export class IdempotencyConflictError extends DomainError {
     super(message);
   }
 }
+
+/**
+ * Lançado quando um `messageId` já recebido volta com conteúdo diferente. O mesmo id com outro
+ * payload não é redelivery: é um produtor reutilizando identificadores, e reprocessar ou
+ * descartar em silêncio esconderia o defeito.
+ */
+export class InboxPayloadMismatchError extends DomainError {
+  public readonly code = "INBOX_PAYLOAD_MISMATCH";
+
+  constructor(consumerName: string, messageId: string) {
+    super(`Message '${messageId}' was already received by '${consumerName}' with a different payload`);
+  }
+}

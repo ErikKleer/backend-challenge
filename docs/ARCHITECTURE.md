@@ -357,6 +357,18 @@ sequenceDiagram
 - **Limitações:** a ordem por agregado **não** é garantida com vários publishers (cada um publica um subconjunto, e um evento que falha e é reagendado chega depois dos seguintes); o consumidor ordena e descarta duplicatas por `walletVersion`. Duplicatas são possíveis e esperadas após crash ou timeout ambíguo (o `SendMessage` pode ter chegado ao broker mesmo com a resposta perdida).
 - **Consequências:** Vários publishers e várias instâncias são seguros sem lock global. O custo é a ordenação best-effort no broker e a transação mais longa durante a rede.
 
+### ADR 24: Consumidor SQS — mesmo caso de uso, inbox persistente e ack depois do commit
+
+- **Contexto:** `wager-transactions.fifo` entrega *at-least-once*, sem ordem entre grupos e com redelivery após crash ou visibilidade expirada (README §3 e §10). O efeito financeiro não pode se repetir e a mensagem só pode ser confirmada quando o efeito estiver commitado.
+- **Decisão:**
+  1. **Dois blocos:** `SqsMessagePoller` (`src/messaging`) é o laço genérico (long polling `SQS_WAIT_SECONDS`, até `SQS_MAX_MESSAGES` por chamada, `SQS_CONSUMER_CONCURRENCY` handlers); `WagerTransactionMessageHandler` (`src/wagering/infrastructure/sqs-consumer`) decide o que fazer com cada mensagem. Papel ligado por `ENABLE_SQS_CONSUMER`; cliente SQS próprio, com `requestTimeout` maior que o long polling (o do outbox é curto de propósito, ADR 23).
+  2. **Ordem não é garantia:** mensagens do mesmo `MessageGroupId` de um lote rodam em sequência e os grupos em paralelo, mas isso é só cortesia. Um `REFUND` que chega antes da referência cai em `PENDING_REFERENCE` (ADR 16); o saldo é protegido pelo lock da wallet, não pela fila.
+  3. **Envelope** `{ messageId, type, occurredAt, data }` validado com zod em etapas (JSON → envelope → `type` → `data`). `data` reaproveita `wagerTransactionFields` e `refineWagerTransactionRules` do POST, mais `idempotencyKey` no corpo. `OPENING` não pertence ao enum aceito, então é recusado como dado inválido. O erro cita campos e regras, nunca o corpo inteiro (dados financeiros).
+  4. **Mesmo caso de uso do HTTP:** `execute(command, { inbox: { consumerName: "wager-transactions-consumer", messageId, payloadHash } })`. Inbox, saldo, ledger, transação e outbox ficam na **mesma transação SQL**; o handler só chama `DeleteMessage` depois que `execute` retornou (commit feito). O `DeleteMessage` passa pela porta `MessageAcknowledger`, que os testes envolvem com falha injetada.
+  5. **Semântica da inbox:** `INSERT … ON CONFLICT DO NOTHING` em `(consumer_name, message_id)`. Se a linha já existia, o efeito já foi (ou está sendo) gravado: o caso de uso devolve o resultado original como *replay*, sem reprocessar. A inbox desfaz junto com a transação: falha de processamento não deixa uma mensagem "recebida" sem efeito.
+  6. **`payloadHash` da inbox** = SHA-256 do JSON canônico de `{ idempotencyKey, hash de negócio }`; `messageId` e `occurredAt` ficam de fora. Dois casos distintos: (a) **mesmo `messageId`, mesmo hash** = redelivery (replay); (b) **mesmo `messageId`, hash diferente** = `InboxPayloadMismatchError` (erro permanente). Um `messageId` **diferente** com a mesma `idempotencyKey` e o mesmo payload é replay pela idempotência da transação, e sua linha de inbox também é marcada como processada.
+- **Consequências:** Um worker que morre depois do commit e antes do ack é inofensivo: a mensagem reaparece e a inbox a descarta. A deduplicação não depende de memória nem da janela de 5 min do FIFO.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

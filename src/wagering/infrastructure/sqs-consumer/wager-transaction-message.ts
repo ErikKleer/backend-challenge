@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
+import { canonicalJson, computePayloadHash } from "../../domain/payload-hash";
 import type { SubmitWagerTransactionCommand } from "../../application/submit-wager-transaction.command";
 import {
   boundedText,
@@ -87,4 +89,26 @@ function describeIssues(error: z.ZodError): string {
   return error.issues
     .map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "body"}: ${issue.message}`)
     .join("; ");
+}
+
+/**
+ * Hash da mensagem para a inbox: o conteúdo de negócio (o mesmo hash da transação) mais a
+ * chave de idempotência. Cabeçalhos de transporte (`messageId`, `occurredAt`) ficam de fora,
+ * então reenviar o mesmo pedido com outro `messageId` não é confundido com adulteração.
+ */
+export function hashMessageContent(command: SubmitWagerTransactionCommand): string {
+  const businessHash = computePayloadHash({
+    providerId: command.providerId,
+    externalTransactionId: command.externalTransactionId,
+    playerId: command.playerId,
+    walletId: command.walletId,
+    roundId: command.roundId,
+    gameId: command.gameId,
+    kind: command.kind,
+    money: command.money,
+    referenceExternalTransactionId: command.referenceExternalTransactionId,
+  });
+  return createHash("sha256")
+    .update(canonicalJson({ idempotencyKey: command.idempotencyKey, businessHash }), "utf8")
+    .digest("hex");
 }

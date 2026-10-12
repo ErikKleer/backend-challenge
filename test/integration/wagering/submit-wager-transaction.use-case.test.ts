@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { IdempotencyConflictError, WalletNotFoundError } from "../../../src/shared/domain/domain.error";
+import {
+  IdempotencyConflictError,
+  InboxPayloadMismatchError,
+  WalletNotFoundError,
+} from "../../../src/shared/domain/domain.error";
 import { Money } from "../../../src/shared/domain/money";
 import type { SubmitWagerTransactionCommand } from "../../../src/wagering/application/submit-wager-transaction.command";
 import {
@@ -676,6 +680,35 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
       expect(result.idempotentReplay).toBe(false);
       expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
       expect(await ledgerOf(wallet.walletId)).toHaveLength(1);
+    });
+
+    it("marks a new message processed when its operation was already stored by another message", async () => {
+      const wallet = await harness.createWallet("100.00");
+      const command = harness.command(wallet, { money: brl("30.00") });
+      await harness.useCase.execute(command, { inbox: inbox("msg-first") });
+
+      const second = await harness.useCase.execute(command, { inbox: inbox("msg-second") });
+
+      expect(second.idempotentReplay).toBe(true);
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
+      const [row] = await db.orm.em.execute<Array<{ processed: boolean }>>(
+        "SELECT processed_at IS NOT NULL AS processed FROM inbox_messages WHERE message_id = 'msg-second'",
+      );
+      expect(row?.processed).toBe(true);
+    });
+
+    it("refuses a messageId that comes back with a different payload hash", async () => {
+      const wallet = await harness.createWallet("100.00");
+      const command = harness.command(wallet, { money: brl("30.00") });
+      await harness.useCase.execute(command, { inbox: inbox("msg-tampered") });
+
+      await expect(
+        harness.useCase.execute(command, {
+          inbox: { ...inbox("msg-tampered"), payloadHash: "f".repeat(64) },
+        }),
+      ).rejects.toBeInstanceOf(InboxPayloadMismatchError);
+
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
     });
 
     it("rolls the inbox record back together with a failed processing", async () => {
