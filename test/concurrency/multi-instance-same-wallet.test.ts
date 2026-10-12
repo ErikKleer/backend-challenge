@@ -155,10 +155,13 @@ describe("three application instances competing for the same wallet", () => {
 
       // A prova de que foi multiprocesso: cada instância atendeu apostas HTTP
       for (const instance of instances) {
-        const handled = instance
-          .logs()
-          .filter((entry) => entry.msg === "wager transaction submitted" && entry.source === "http");
-        expect(handled.length).toBeGreaterThan(0);
+        await waitFor(
+          () =>
+            instance
+              .logs()
+              .some((entry) => entry.msg === "wager transaction submitted" && entry.source === "http"),
+          { description: `instance '${instance.name}' to have served HTTP bets` },
+        );
       }
 
       // Eventos: todo evento da wallet chegou à fila pelo menos uma vez

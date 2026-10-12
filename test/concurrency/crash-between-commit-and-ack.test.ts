@@ -99,10 +99,11 @@ describe("worker killed after the commit and before the acknowledgement", () => 
     }
 
     // O efeito commitado pela instância morta voltou como replay e foi descartado, não reaplicado
-    const replays = takeovers
-      .flatMap((instance) => instance.logs())
-      .filter((entry) => entry.msg === "wager transaction submitted" && entry.idempotentReplay === true);
-    expect(replays.length).toBeGreaterThanOrEqual(1);
+    const replays = () =>
+      takeovers
+        .flatMap((instance) => instance.logs())
+        .filter((entry) => entry.msg === "wager transaction submitted" && entry.idempotentReplay === true);
+    await waitFor(() => replays().length >= 1, { description: "the replay log of the redelivered message" });
 
     await assertNoStuckTransactions(db.orm.em);
     expect(await assertAllWalletsConsistent(db.orm.em)).toBe(WALLETS);
