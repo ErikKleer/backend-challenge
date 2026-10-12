@@ -4,6 +4,7 @@ import type { OutboxMessage } from "../../domain/outbox-message";
 import { MikroOrmUnitOfWork } from "../../../shared/infrastructure/persistence/mikro-orm-unit-of-work";
 import { classifyPostgreSqlError } from "../../../shared/infrastructure/persistence/postgres-error-classifier";
 import type { OutboxMessageRow } from "./outbox-message.entity-schema";
+import { toOptionalDate } from "../../../shared/infrastructure/persistence/timestamps";
 import { OutboxMessagePersistenceMapper } from "./outbox-message.mapper";
 
 const SELECT_COLS = `
@@ -71,6 +72,17 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
         [now, limit],
       );
       return (rows ?? []).map((row) => OutboxMessagePersistenceMapper.toDomain(row));
+    } catch (error) {
+      throw classifyPostgreSqlError(error);
+    }
+  }
+
+  public async oldestPendingOccurredAt(): Promise<Date | undefined> {
+    try {
+      const rows = await this.em.execute<Array<{ oldest: string | Date | null }>>(
+        `SELECT MIN(occurred_at) AS oldest FROM outbox_messages WHERE published_at IS NULL`,
+      );
+      return toOptionalDate(rows?.[0]?.oldest);
     } catch (error) {
       throw classifyPostgreSqlError(error);
     }

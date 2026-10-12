@@ -620,6 +620,7 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
           throw new Error("injected failure after enqueue");
         },
         claimDue: (now, limit) => ctx.outboxRepo.claimDue(now, limit),
+        oldestPendingOccurredAt: () => ctx.outboxRepo.oldestPendingOccurredAt(),
         save: (message) => ctx.outboxRepo.save(message),
       };
       const failing = new WageringHarness(ctx, { outbox: failingOutbox });

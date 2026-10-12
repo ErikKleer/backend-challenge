@@ -16,6 +16,13 @@ export interface OutboxRepository {
   claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
 
   /**
+   * `occurred_at` do evento pendente mais antigo (inclusive os que aguardam retry), ou
+   * `undefined` se a outbox está em dia. Base do `outbox_lag_seconds`; é uma leitura simples,
+   * sem lock, então não bloqueia nem é bloqueada pelos publishers.
+   */
+  oldestPendingOccurredAt(): Promise<Date | undefined>;
+
+  /**
    * Persiste o estado mutável (attempts, nextAttemptAt, publishedAt).
    */
   save(message: OutboxMessage): Promise<void>;

@@ -3,6 +3,8 @@ import { OutboxBatchPublisher } from "../../src/messaging/application/outbox-bat
 import { OutboxMessage } from "../../src/messaging/domain/outbox-message";
 import type { Clock } from "../../src/shared/application/clock.port";
 import type { UnitOfWork } from "../../src/shared/application/unit-of-work.port";
+import { AppLogger } from "../../src/shared/infrastructure/observability/app-logger";
+import { MetricsService } from "../../src/shared/infrastructure/observability/metrics.service";
 import type { TestDatabaseContext } from "./database";
 import type { PersistenceTestContext } from "./persistence";
 
@@ -87,7 +89,13 @@ export async function readOutbox(db: TestDatabaseContext): Promise<Map<string, O
 export function buildBatchPublisher(
   ctx: PersistenceTestContext,
   publisher: EventPublisher,
-  options: { batchSize: number; clock?: Clock; unitOfWork?: UnitOfWork },
+  options: {
+    batchSize: number;
+    clock?: Clock;
+    unitOfWork?: UnitOfWork;
+    metrics?: MetricsService;
+    logger?: AppLogger;
+  },
 ): OutboxBatchPublisher {
   return new OutboxBatchPublisher(
     {
@@ -95,6 +103,8 @@ export function buildBatchPublisher(
       outbox: ctx.outboxRepo,
       publisher,
       clock: options.clock ?? ctx.clock,
+      metrics: options.metrics ?? new MetricsService({ collectDefaults: false }),
+      logger: options.logger ?? new AppLogger({ level: "silent" }),
     },
     { batchSize: options.batchSize },
   );
@@ -128,4 +138,14 @@ export class FaultyPublisher implements EventPublisher {
     }
     await this.inner.publish(message);
   }
+}
+
+/** Valor atual de um contador/gauge sem rótulos no registry do `MetricsService`. */
+export async function metricValue(metrics: MetricsService, name: string): Promise<number> {
+  const metric = metrics.registry.getSingleMetric(name);
+  if (!metric) {
+    throw new Error(`Unknown metric '${name}'`);
+  }
+  const { values } = await metric.get();
+  return values[0]?.value ?? 0;
 }

@@ -4,6 +4,7 @@ import { CLOCK_TOKEN, type Clock } from "../shared/application/clock.port";
 import { UNIT_OF_WORK_TOKEN, type UnitOfWork } from "../shared/application/unit-of-work.port";
 import { type EnvConfig, envSchema } from "../shared/infrastructure/config/env.config";
 import { AppLogger } from "../shared/infrastructure/observability/app-logger";
+import { MetricsService } from "../shared/infrastructure/observability/metrics.service";
 import { EVENT_PUBLISHER_TOKEN, type EventPublisher } from "./application/event-publisher.port";
 import { OutboxBatchPublisher } from "./application/outbox-batch-publisher";
 import { OutboxPublisherWorker } from "./application/outbox-publisher.worker";
@@ -64,10 +65,12 @@ export class MessagingModule {
             outbox: OutboxRepository,
             publisher: EventPublisher,
             clock: Clock,
+            metrics: MetricsService,
+            logger: AppLogger,
             config: EnvConfig,
           ) =>
             new OutboxBatchPublisher(
-              { unitOfWork, outbox, publisher, clock },
+              { unitOfWork, outbox, publisher, clock, metrics, logger },
               { batchSize: config.OUTBOX_BATCH_SIZE },
             ),
           inject: [
@@ -75,6 +78,8 @@ export class MessagingModule {
             OUTBOX_REPOSITORY_TOKEN,
             EVENT_PUBLISHER_TOKEN,
             CLOCK_TOKEN,
+            MetricsService,
+            AppLogger,
             MESSAGING_CONFIG_TOKEN,
           ],
         },

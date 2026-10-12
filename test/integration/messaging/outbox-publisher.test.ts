@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { SqsEventPublisher } from "../../../src/messaging/infrastructure/sqs/sqs-event-publisher";
 import { SqsQueueUrlResolver } from "../../../src/messaging/infrastructure/sqs/sqs-queue-url.resolver";
 import { createTestDatabase, type TestDatabaseContext } from "../../support/database";
+import { AppLogger } from "../../../src/shared/infrastructure/observability/app-logger";
+import { MetricsService } from "../../../src/shared/infrastructure/observability/metrics.service";
 import {
   buildBatchPublisher,
   FaultyPublisher,
+  metricValue,
   MutableClock,
   OUTBOX_BASE_TIME,
   readOutbox,
@@ -118,5 +121,54 @@ describe("OutboxBatchPublisher", () => {
 
     const received = await receiveUntil(queues.client, queues.eventsUrl, (all) => all.length >= 2);
     expect(eventIdsOf(received).sort()).toEqual([first!, third!].sort());
+  });
+});
+
+describe("OutboxBatchPublisher observability", () => {
+  const at = (ms: number) => new Date(OUTBOX_BASE_TIME.getTime() + ms);
+
+  it("raises outbox_lag_seconds while events are pending and returns to zero once published", async () => {
+    await seedOutbox(ctx, 1, at(0));
+    await seedOutbox(ctx, 1, at(10_000));
+    const metrics = new MetricsService({ collectDefaults: false });
+    const clock = new MutableClock(at(30_000));
+    // Duas rodadas de falha (2 eventos × 2 ciclos) antes de a publicação funcionar
+    const flaky = new FaultyPublisher(sqsPublisher, { failFirst: 4 });
+    const batch = buildBatchPublisher(ctx, flaky, { batchSize: 10, clock, metrics });
+
+    // Tudo falha: os dois seguem pendentes e o mais antigo tem 30s
+    await batch.runOnce();
+    expect(await metricValue(metrics, "outbox_lag_seconds")).toBe(30);
+    expect(await metricValue(metrics, "outbox_publish_failures_total")).toBe(2);
+    expect(await metricValue(metrics, "outbox_published_total")).toBe(0);
+
+    // O backoff de 1s venceu: falham de novo e o lag acompanha o relógio
+    clock.set(at(40_000));
+    await batch.runOnce();
+    expect(await metricValue(metrics, "outbox_lag_seconds")).toBe(40);
+
+    // Backoff de 2s vencido: publica e o lag volta a zero
+    clock.set(at(45_000));
+    await batch.runOnce();
+    expect(await metricValue(metrics, "outbox_lag_seconds")).toBe(0);
+    expect(await metricValue(metrics, "outbox_published_total")).toBe(2);
+    expect(await metricValue(metrics, "outbox_publish_failures_total")).toBe(4);
+  });
+
+  it("logs batch counts and event ids without the event payload", async () => {
+    const [published, failed] = await seedOutbox(ctx, 2);
+    const lines: string[] = [];
+    const logger = new AppLogger({ level: "info", destination: { write: (line) => void lines.push(line) } });
+    const flaky = new FaultyPublisher(sqsPublisher, { failWhen: (message) => message.id === failed });
+    const batch = buildBatchPublisher(ctx, flaky, { batchSize: 10, logger });
+
+    await batch.runOnce();
+
+    const entry = lines.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => line.claimed === 2);
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({ claimed: 2, published: 1, failed: 1, publishedEventIds: [published] });
+    expect(entry!.failures).toEqual([{ eventId: failed, error: "injected publish failure" }]);
+    expect(lines.join("")).not.toContain('"data"');
+    expect(lines.join("")).not.toContain("WalletBalanceChanged");
   });
 });

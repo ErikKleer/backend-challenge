@@ -1,5 +1,7 @@
 import type { Clock } from "../../shared/application/clock.port";
 import type { UnitOfWork } from "../../shared/application/unit-of-work.port";
+import type { AppLogger } from "../../shared/infrastructure/observability/app-logger";
+import type { MetricsService } from "../../shared/infrastructure/observability/metrics.service";
 import { DEFAULT_OUTBOX_BACKOFF, type OutboxBackoffPolicy } from "../domain/outbox-message";
 import type { EventPublisher } from "./event-publisher.port";
 import type { OutboxRepository } from "./outbox.repository.port";
@@ -20,6 +22,13 @@ export interface OutboxBatchPublisherDependencies {
   outbox: OutboxRepository;
   publisher: EventPublisher;
   clock: Clock;
+  metrics: MetricsService;
+  logger: AppLogger;
+}
+
+interface PublishFailure {
+  eventId: string;
+  error: string;
 }
 
 /**
@@ -57,30 +66,81 @@ export class OutboxBatchPublisher {
    * das que deram certo; uma falha de banco (claim/save/commit) rejeita o ciclo inteiro e o
    * rollback devolve todas as linhas ao pool de pendentes.
    */
-  public runOnce(): Promise<OutboxBatchResult> {
+  public async runOnce(): Promise<OutboxBatchResult> {
     const { unitOfWork, outbox, publisher, clock } = this.deps;
+    const publishedIds: string[] = [];
+    const failures: PublishFailure[] = [];
 
-    return unitOfWork.run(async () => {
+    const claimed = await unitOfWork.run(async () => {
+      // Reinicia a cada tentativa da transação para não contar de um ciclo que deu rollback
+      publishedIds.length = 0;
+      failures.length = 0;
       const messages = await outbox.claimDue(clock.now(), this.options.batchSize);
-      let published = 0;
-      let failed = 0;
 
       for (const message of messages) {
         try {
           await publisher.publish(message);
-        } catch {
+        } catch (error) {
           // Sem limite de tentativas: evento confirmado não se perde, só atrasa
           message.scheduleRetry(clock.now(), this.backoff);
-          failed += 1;
+          failures.push({ eventId: message.id, error: errorMessage(error) });
           await outbox.save(message);
           continue;
         }
         message.markPublished(clock.now());
-        published += 1;
+        publishedIds.push(message.id);
         await outbox.save(message);
       }
 
-      return { claimed: messages.length, published, failed };
+      return messages.length;
     });
+
+    // Métricas e logs só depois do commit: refletem o que ficou gravado, não um lote revertido
+    this.report(claimed, publishedIds, failures);
+    await this.refreshLag();
+
+    return { claimed, published: publishedIds.length, failed: failures.length };
   }
+
+  private report(claimed: number, publishedIds: string[], failures: PublishFailure[]): void {
+    const { metrics, logger } = this.deps;
+    if (claimed === 0) {
+      return;
+    }
+    metrics.recordOutboxPublished(publishedIds.length);
+    metrics.recordOutboxPublishFailure(failures.length);
+
+    // Só identificadores e contagens: o payload financeiro nunca vai para o log
+    const fields = {
+      claimed,
+      published: publishedIds.length,
+      failed: failures.length,
+      publishedEventIds: publishedIds,
+      failures,
+    };
+    if (failures.length > 0) {
+      logger.warn("outbox batch finished with failures", fields);
+    } else {
+      logger.info("outbox batch published", fields);
+    }
+  }
+
+  /**
+   * Atualiza `outbox_lag_seconds` a cada ciclo, inclusive os vazios (é assim que o gauge
+   * volta a 0). Uma falha aqui não pode derrubar a publicação: só perde a amostra.
+   */
+  private async refreshLag(): Promise<void> {
+    const { unitOfWork, outbox, clock, metrics, logger } = this.deps;
+    try {
+      const oldest = await unitOfWork.run(() => outbox.oldestPendingOccurredAt());
+      const lagMs = oldest === undefined ? 0 : clock.now().getTime() - oldest.getTime();
+      metrics.setOutboxLagSeconds(Math.max(0, lagMs) / 1000);
+    } catch (error) {
+      logger.warn("outbox lag could not be measured", { error: errorMessage(error) });
+    }
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

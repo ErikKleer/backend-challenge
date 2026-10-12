@@ -107,6 +107,26 @@ describe("OutboxRepository", () => {
     expect(claimed).toHaveLength(3);
   });
 
+  it("should report the oldest pending occurrence, counting messages waiting for a retry", async () => {
+    const empty = await ctx.unitOfWork.run(() => ctx.outboxRepo.oldestPendingOccurredAt());
+    expect(empty).toBeUndefined();
+
+    const oldest = message(1, at(-30));
+    const waitingRetry = message(2, at(-20));
+    waitingRetry.scheduleRetry(at(0));
+    const published = message(3, at(-60));
+    published.markPublished(at(-5));
+    await seed([waitingRetry, published, oldest]);
+
+    expect(await ctx.unitOfWork.run(() => ctx.outboxRepo.oldestPendingOccurredAt())).toEqual(at(-30));
+
+    await ctx.unitOfWork.run(async () => {
+      oldest.markPublished(at(1));
+      await ctx.outboxRepo.save(oldest);
+    });
+    expect(await ctx.unitOfWork.run(() => ctx.outboxRepo.oldestPendingOccurredAt())).toEqual(at(-20));
+  });
+
   it("should persist publication and retry state through save", async () => {
     const toPublish = message(1, at(-10));
     const toRetry = message(2, at(-9));
