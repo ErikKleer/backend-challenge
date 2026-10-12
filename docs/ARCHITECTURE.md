@@ -85,3 +85,129 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
      - Metadados de transporte (`Idempotency-Key`, `messageId`, headers HTTP, timestamps de fila) são excluídos do hash.
 - **Consequências:** Integridade semântica determinística, auditoria inequívoca de transições e idempotência estrita independentemente do canal de ingestão (HTTP vs SQS).
 
+
+### ADR 7: Schema do Banco de Dados, Constraints e Garantias Estruturais de Auditoria
+
+- **Contexto:** Em sistemas de liquidação financeira distribuída (README §5.9), regras de negócio e integridade monetária não podem residir exclusivamente no código de aplicação. O banco de dados PostgreSQL deve ser o guardião definitivo contra concorrência destrutiva, duplicações de crédito/débito, race conditions e violações de auditoria contábil.
+- **Decisão:**
+  1. **Tabelas e Restrições Estruturais:**
+     - `wallets`: Unicidade garantida por `UNIQUE(player_id, currency)`. Não-negatividade imposta por `CHECK(balance >= 0)`. Concorrência otimista resguardada por `CHECK(version >= 1)` e formato ISO por `CHECK(currency ~ '^[A-Z]{3}$')`.
+     - `wager_transactions`: Idempotência garantida duplamente por `UNIQUE(idempotency_key)` e `UNIQUE(provider_id, external_transaction_id)`. Coerência de estados assegurada por constraints estritas (`CHECK failure_code` coerente com `REJECTED`/`FAILED`; `CHECK processed_at` coerente com `PROCESSED`; `CHECK reference_external_transaction_id` obrigatório para `REFUND`/`ROLLBACK`).
+     - **Reversão Única:** Protegida no schema através de índice único parcial:
+       `CREATE UNIQUE INDEX uq_idx_wager_transactions_processed_reversal ON wager_transactions (reference_transaction_id) WHERE status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK');`
+     - **Políticas de Imutabilidade e Auditoria em `wager_transactions`:** Triggers PL/pgSQL bloqueiam qualquer mutação (`UPDATE`) sobre transações em estados terminais (`PROCESSED`, `REJECTED`, `FAILED`), proíbem modificação de colunas imutáveis/identidade (`provider_id`, `wallet_id`, `kind`, `amount`, etc.), e proíbem terminantemente `DELETE` de transações.
+     - `wallet_ledger_entries`: Livro-razão estritamente **append-only**. Constraints verificam a aritmética exata de cada linha (`DEBIT` exige `balance_after = balance_before - amount`; `CREDIT` exige `balance_after = balance_before + amount`). Chave `UNIQUE(transaction_id, wallet_id)` assegura no máximo um lançamento por carteira por transação financeira. Chave `UNIQUE(wallet_id, wallet_version)` previne forks contábeis. Triggers `BEFORE UPDATE OR DELETE` (row-level) e `BEFORE TRUNCATE` (statement-level) impedem mutação, exclusão ou truncamento acidental.
+     - `inbox_messages`: Chave primária composta `PRIMARY KEY (consumer_name, message_id)` impede duplicidade de ingestão e viabiliza redelivery idempotente.
+     - `outbox_messages`: Índice parcial `(COALESCE(next_attempt_at, occurred_at)) WHERE published_at IS NULL` otimiza o claim concorrente de eventos pendentes para publicação com `SKIP LOCKED`.
+  2. **Avaliação do Constraint Trigger Deferrable para Saldo da Wallet:**
+     - A constraint trigger opcional diferida (`DEFERRABLE INITIALLY DEFERRED`) que validaria `wallets.balance = last ledger balance_after` no momento do commit foi avaliada. Em cenários de alta concorrência em hot wallets e pipelines transacionais que manipulam operações sem efeito no saldo (como `LOSS` ou rejeições que registram auditoria sem criar lançamento contábil), esse trigger impõe lock adicional e acoplamento desnecessário, uma vez que a invariante contábil já é resguardada deterministicamente pelo Unit of Work da aplicação (`Wallet` aggregate + `wallet_ledger_entries`), pelo optimistic locking (`version`) e pelas constraints de não-negatividade e unicidade de versão (`UNIQUE(wallet_id, wallet_version)`). Optou-se por não aplicá-la no schema para resguardar a latência e o throughput de hot wallets.
+- **Consequências:** Impossibilidade de corrupção de saldo, lost updates ou adulteração contábil mesmo sob falha catastrófica de código ou acesso concorrente direto ao banco.
+
+
+
+### Modelo de Dados (Diagrama ER)
+
+```mermaid
+erDiagram
+    wallets ||--o{ wager_transactions : "participates in"
+    wallets ||--o{ wallet_ledger_entries : "has entries"
+    wager_transactions ||--o| wallet_ledger_entries : "produces"
+    wager_transactions |o--o| wager_transactions : "references"
+
+    wallets {
+        uuid id PK
+        text player_id
+        char(3) currency
+        numeric balance
+        integer version
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    wager_transactions {
+        uuid id PK
+        text provider_id
+        text external_transaction_id
+        text idempotency_key
+        char(64) payload_hash
+        uuid wallet_id FK
+        text player_id
+        text round_id
+        text game_id
+        text kind
+        text status
+        numeric amount
+        char(3) currency
+        text reference_external_transaction_id
+        uuid reference_transaction_id FK
+        text failure_code
+        numeric observed_balance
+        integer reference_attempts
+        timestamptz next_reference_attempt_at
+        timestamptz created_at
+        timestamptz processed_at
+        timestamptz updated_at
+    }
+
+    wallet_ledger_entries {
+        uuid id PK
+        uuid wallet_id FK
+        uuid transaction_id FK
+        text direction
+        numeric amount
+        char(3) currency
+        numeric balance_before
+        numeric balance_after
+        integer wallet_version
+        timestamptz created_at
+    }
+
+    inbox_messages {
+        text consumer_name PK
+        text message_id PK
+        char(64) payload_hash
+        timestamptz received_at
+        timestamptz processed_at
+    }
+
+    outbox_messages {
+        uuid id PK
+        text aggregate_id
+        text event_type
+        jsonb payload
+        timestamptz occurred_at
+        integer attempts
+        timestamptz next_attempt_at
+        timestamptz published_at
+    }
+```
+
+### Mapeamento: Garantia Contábil/Concorrência → Mecanismo no Schema
+
+| Garantia / Invariante | Mecanismo Implementado no Schema | Tabela / Objeto |
+|---|---|---|
+| No máximo uma carteira por jogador e moeda | `UNIQUE (player_id, currency)` | `wallets` |
+| Saldo da carteira nunca negativo | `CHECK (balance >= 0)` | `wallets` |
+| Versão de concorrência estritamente positiva | `CHECK (version >= 1)` | `wallets` |
+| Formato de moeda estrito ISO-4217 | `CHECK (currency ~ '^[A-Z]{3}$')` | `wallets`, `wager_transactions`, `wallet_ledger_entries` |
+| Idempotência por chave de requisição | `UNIQUE (idempotency_key)` | `wager_transactions` |
+| Idempotência por provedor e ID externo | `UNIQUE (provider_id, external_transaction_id)` | `wager_transactions` |
+| Valor monetário da transação não-negativo | `CHECK (amount >= 0)` | `wager_transactions` |
+| Coerência do código de falha | `CHECK ((failure_code IS NOT NULL AND status IN ('REJECTED','FAILED')) OR (failure_code IS NULL AND status NOT IN ('REJECTED','FAILED')))` | `wager_transactions` |
+| Coerência do timestamp de processamento | `CHECK ((processed_at IS NOT NULL AND status = 'PROCESSED') OR (processed_at IS NULL AND status <> 'PROCESSED'))` | `wager_transactions` |
+| Obrigatoriedade de referência para reversões | `CHECK ((kind IN ('REFUND','ROLLBACK') AND reference_external_transaction_id IS NOT NULL) OR (kind NOT IN ('REFUND','ROLLBACK')))` | `wager_transactions` |
+| Reversão única de transação processada | `CREATE UNIQUE INDEX ... (reference_transaction_id) WHERE status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK')` | `wager_transactions` |
+| Polling eficiente de referências pendentes | `CREATE INDEX ... (next_reference_attempt_at) WHERE status = 'PENDING_REFERENCE'` | `wager_transactions` |
+| Imutabilidade de transação em estado terminal | Trigger `BEFORE UPDATE` com `RAISE EXCEPTION` | `wager_transactions` |
+| Imutabilidade de colunas de identidade | Trigger `BEFORE UPDATE` bloqueia alteração de dados de negócio | `wager_transactions` |
+| Auditoria: proibição de exclusão de transações | Trigger `BEFORE DELETE` com `RAISE EXCEPTION` | `wager_transactions` |
+| Lançamento contábil com valor estritamente positivo | `CHECK (amount > 0)` | `wallet_ledger_entries` |
+| Saldos contábeis anterior e posterior não-negativos | `CHECK (balance_before >= 0 AND balance_after >= 0)` | `wallet_ledger_entries` |
+| Aritmética de partida contábil exata | `CHECK ((direction = 'DEBIT' AND balance_after = balance_before - amount) OR (direction = 'CREDIT' AND balance_after = balance_before + amount))` | `wallet_ledger_entries` |
+| No máximo um lançamento contábil por wallet por transação | `UNIQUE (transaction_id, wallet_id)` | `wallet_ledger_entries` |
+| Unicidade e ordenação estrita da versão da wallet | `UNIQUE (wallet_id, wallet_version)` | `wallet_ledger_entries` |
+| Ledger estruturalmente append-only | Trigger `BEFORE UPDATE OR DELETE` (row-level) | `wallet_ledger_entries` |
+| Proibição de truncamento acidental do ledger | Trigger `BEFORE TRUNCATE` (statement-level) | `wallet_ledger_entries` |
+| Deduplicação de consumo assíncrono (Inbox) | `PRIMARY KEY (consumer_name, message_id)` | `inbox_messages` |
+| Claim eficiente de eventos pendentes (Outbox) | `CREATE INDEX ... (COALESCE(next_attempt_at, occurred_at)) WHERE published_at IS NULL` | `outbox_messages` |
+
