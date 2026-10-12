@@ -37,6 +37,10 @@ export class SqsMessagePoller {
   private stopping = false;
   private loop?: Promise<void>;
   private readonly abort = new AbortController();
+  /** Resolve quando `stop()` é chamado; deixa o laço sair de uma espera por handlers lentos. */
+  private readonly stopRequested = new Promise<void>((resolve) =>
+    this.abort.signal.addEventListener("abort", () => resolve(), { once: true }),
+  );
 
   /** Tarefas por mensagem recebida (aguardando vaga ou rodando). Nunca rejeitam. */
   private readonly pending = new Set<Promise<void>>();
@@ -55,8 +59,9 @@ export class SqsMessagePoller {
     this.freeSlots = options.concurrency;
   }
 
+  /** Um poller não reinicia depois de parado: o cancelamento e o estado de parada são definitivos. */
   public start(): void {
-    if (this.loop) {
+    if (this.loop || this.stopping) {
       return;
     }
     this.logger.info("sqs consumer started", {
@@ -92,7 +97,8 @@ export class SqsMessagePoller {
   private async run(): Promise<void> {
     while (!this.stopping) {
       if (this.pending.size >= this.options.concurrency) {
-        await Promise.race(this.pending);
+        // Sem a segunda ponta, um handler travado seguraria o `stop()` além do prazo de parada
+        await Promise.race([...this.pending, this.stopRequested]);
         continue;
       }
 

@@ -5,7 +5,7 @@ import { assertLedgerMatchesBalance } from "../../support/invariants";
 import { waitFor } from "../../support/parallel";
 import { createPersistenceTestContext, type PersistenceTestContext } from "../../support/persistence";
 import { buildConsumerRig, counterValue, sendWagerMessage, wagerMessageBody, type ConsumerRig } from "../../support/consumer";
-import { createTestQueues, isQueueEmpty, receiveUntil, sendMessage, type TestQueues } from "../../support/sqs";
+import { createTestQueues, isQueueEmpty, queueCounts, receiveUntil, sendMessage, type TestQueues } from "../../support/sqs";
 import { brl } from "../../support/wagering";
 import type { LedgerRepository } from "../../../src/wallet/application/ledger.repository.port";
 import type { WalletLedgerEntry } from "../../../src/wallet/domain/wallet-ledger-entry";
@@ -354,6 +354,54 @@ describe("wager transactions consumer", () => {
       } finally {
         await limited.teardown();
       }
+    });
+  });
+
+  describe("graceful shutdown", () => {
+    it("lets the in-flight message commit and be acknowledged, and returns the unstarted ones", async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let entered = 0;
+      rig = buildConsumerRig(ctx, queues, {
+        concurrency: 1,
+        useCase: (real) => ({
+          execute: async (command, options) => {
+            entered += 1;
+            await gate;
+            return real.execute(command, options);
+          },
+        }),
+      });
+      const wallet = await rig.harness.createWallet("100.00");
+      for (let n = 0; n < 3; n += 1) {
+        const command = rig.harness.command(wallet, { money: brl("10.00") });
+        await sendWagerMessage(queues, wallet, command, messageIds(`msg-stop-${n}`).ids[0]!);
+      }
+
+      rig.poller.start();
+      await waitFor(() => entered === 1, { description: "first message in flight" });
+      const stopping = rig.poller.stop();
+      release();
+      await stopping;
+
+      // A em andamento terminou: commit feito e ack dado. As outras nem começaram
+      expect(entered).toBe(1);
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "90.00", version: 2 });
+      expect(await transactionCount(wallet.walletId)).toBe(1);
+      await waitFor(
+        async () => (await queueCounts(queues.client, queues.transactionsUrl)).visible === 2,
+        { timeoutMs: 3000, description: "unstarted messages visible again" },
+      );
+
+      // Outro processo (ou este depois de reiniciar) conclui o resto sem perda nem duplicação
+      const successor = buildConsumerRig(ctx, queues);
+      successor.poller.start();
+      await queueDrained();
+      await successor.poller.stop();
+
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 4 });
+      expect(await transactionCount(wallet.walletId)).toBe(3);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
     });
   });
 });

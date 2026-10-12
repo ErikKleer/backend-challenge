@@ -6,7 +6,7 @@ import { SqsMessagePoller } from "../../../src/messaging/infrastructure/sqs/sqs-
 import { SqsQueueUrlResolver } from "../../../src/messaging/infrastructure/sqs/sqs-queue-url.resolver";
 import { AppLogger } from "../../../src/shared/infrastructure/observability/app-logger";
 import { waitFor } from "../../support/parallel";
-import { createTestQueues, isQueueEmpty, sendMessage, type TestQueues } from "../../support/sqs";
+import { createTestQueues, isQueueEmpty, queueCounts, sendMessage, type TestQueues } from "../../support/sqs";
 
 let queues: TestQueues;
 let acknowledger: MessageAcknowledger;
@@ -113,5 +113,62 @@ describe("SqsMessagePoller", () => {
     await poller.stop();
 
     expect(receiveCounts.slice(0, 2)).toEqual([1, 2]);
+  });
+
+  it("returns messages that never started when it stops, and lets the running one finish", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const started: string[] = [];
+    const finished: string[] = [];
+    const handler: QueueMessageHandler = {
+      async handle(message: QueueMessage) {
+        const { n } = JSON.parse(message.body) as { n: number };
+        started.push(String(n));
+        await gate;
+        await acknowledger.acknowledge(message);
+        finished.push(String(n));
+      },
+    };
+    const poller = buildPoller(handler, { concurrency: 1 });
+
+    for (let n = 0; n < 3; n += 1) {
+      await sendMessage(queues.client, queues.transactionsUrl, JSON.stringify({ n }), { groupId: "same" });
+    }
+    poller.start();
+    await waitFor(() => started.length === 1, { description: "first handler started" });
+
+    const stopping = poller.stop();
+    release();
+    await stopping;
+
+    expect(started).toHaveLength(1);
+    expect(finished).toEqual(started);
+    // As duas que não começaram voltaram à fila na hora, sem esperar a visibilidade de 5s
+    await waitFor(async () => (await queueCounts(queues.client, queues.transactionsUrl)).visible === 2, {
+      timeoutMs: 3000,
+      description: "unstarted messages visible again",
+    });
+  });
+
+  it("returns a message to the queue when its handler overruns the shutdown timeout", async () => {
+    let started = false;
+    const handler: QueueMessageHandler = {
+      async handle() {
+        started = true;
+        // Nunca termina dentro do prazo e nunca confirma
+        await new Promise<void>((resolve) => setTimeout(resolve, 15_000).unref());
+      },
+    };
+    const poller = buildPoller(handler, { concurrency: 1, shutdownTimeoutMs: 300 });
+
+    await sendMessage(queues.client, queues.transactionsUrl, "{}");
+    poller.start();
+    await waitFor(() => started, { description: "handler started" });
+    await poller.stop();
+
+    await waitFor(async () => (await queueCounts(queues.client, queues.transactionsUrl)).visible === 1, {
+      timeoutMs: 3000,
+      description: "overdue message visible again",
+    });
   });
 });
