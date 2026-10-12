@@ -11,8 +11,13 @@ import type { WagerTransactionRow } from "./wager-transaction.entity-schema";
 export class WagerTransactionPersistenceMapper {
   /**
    * Converte uma entidade de domínio WagerTransaction para o formato relacional WagerTransactionRow.
+   * `updatedAt` é o instante da gravação (a transação não guarda esse dado); na inserção
+   * vale o próprio `createdAt`.
    */
-  public static toRow(domain: WagerTransaction): WagerTransactionRow {
+  public static toRow(
+    domain: WagerTransaction,
+    updatedAt: Date = domain.createdAt,
+  ): WagerTransactionRow {
     return {
       id: domain.id,
       providerId: domain.providerId,
@@ -35,7 +40,7 @@ export class WagerTransactionPersistenceMapper {
       nextReferenceAttemptAt: domain.nextReferenceAttemptAt ?? null,
       createdAt: domain.createdAt,
       processedAt: domain.processedAt ?? null,
-      updatedAt: domain.processedAt ?? domain.createdAt,
+      updatedAt,
     };
   }
 

@@ -34,9 +34,10 @@ export interface WagerTransactionRepository {
 
   /**
    * Atualiza os campos mutáveis da transação (status, failureCode, referenceTransactionId,
-   * observedBalance, referenceAttempts, nextReferenceAttemptAt, processedAt, updatedAt).
+   * observedBalance, referenceAttempts, nextReferenceAttemptAt, processedAt) e grava `at`
+   * em `updated_at`, de modo que rejeições e esperas por referência também o avançam.
    */
-  save(transaction: WagerTransaction): Promise<void>;
+  save(transaction: WagerTransaction, at: Date): Promise<void>;
 }
 
 export const WAGER_TRANSACTION_REPOSITORY_TOKEN = Symbol("WagerTransactionRepository");

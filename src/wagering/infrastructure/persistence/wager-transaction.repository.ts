@@ -127,9 +127,9 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     }
   }
 
-  public async save(transaction: WagerTransaction): Promise<void> {
+  public async save(transaction: WagerTransaction, at: Date): Promise<void> {
     try {
-      const row = WagerTransactionPersistenceMapper.toRow(transaction);
+      const row = WagerTransactionPersistenceMapper.toRow(transaction, at);
       await this.em.execute(
         `UPDATE wager_transactions
          SET status = ?, failure_code = ?, reference_transaction_id = ?, observed_balance = ?,
