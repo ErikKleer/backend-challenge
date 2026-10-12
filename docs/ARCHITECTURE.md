@@ -303,6 +303,16 @@ sequenceDiagram
      Rejeição de negócio é 422, não 4xx de formato nem 409: o payload é válido e a decisão é definitiva, então reenviar a mesma chave devolve o mesmo 422. `PENDING_REFERENCE` é 202 porque nada foi recusado nem concluído; o provedor consulta ou aguarda o evento. Só o 503 convida a repetir a mesma requisição. Um `FAILED` replayado (não produzido por este fluxo) também sai como 422.
 - **Consequências:** Uma regra nova de entrada vale para HTTP e SQS de uma vez. O corpo não repete a chave: um provedor que envie a mesma chave com outro payload recebe o conflito de idempotência (ADR 16), não uma validação. O provedor decide reenviar, corrigir ou desistir só pelo status e pelo `code`, sem interpretar mensagens.
 
+### ADR 19: Consultas de wallet e ledger com cursor opaco
+
+- **Contexto:** `GET /wallets/:id` e `GET /wallets/:id/ledger` (README §9) são somente leitura e não podem competir pelo lock da wallet nem usar `OFFSET`, que repetiria ou pularia itens com o ledger crescendo.
+- **Decisão:**
+  1. **Sem lock e sem transação de escrita.** A leitura usa `findById` (sem `FOR ... UPDATE`); consulta nunca atrasa nem é atrasada por um débito em curso.
+  2. **Paginação por keyset sobre `wallet_version`**: `WHERE wallet_id = ? AND wallet_version > ? ORDER BY wallet_version LIMIT limit + 1`. A linha extra só indica que existe próxima página. Usa o índice de `UNIQUE(wallet_id, wallet_version)`, e o custo da página não depende da profundidade.
+  3. **Cursor opaco e estável:** base64url de `{ v: 1, wv: <último wallet_version> }`. Como `wallet_version` é imutável e crescente, lançamentos novos aparecem só depois do cursor e um cursor antigo continua válido. `v` permite evoluir o formato. Cursor malformado, de outra versão ou com `wv` inválido ⇒ 400 `VALIDATION_ERROR`; `limit` padrão 50, máximo 200, fora disso ⇒ 400.
+  4. **Ids de rota** que não sejam UUID viram 400 (`UuidParamPipe`) em vez de erro de sintaxe do PostgreSQL (500).
+- **Consequências:** Duas leituras (existência da wallet e página) não formam um snapshot único; é aceitável porque o ledger é append-only e a página nunca muda depois de escrita. O cursor não é assinado: forjá-lo apenas escolhe de onde ler, sem expor dado que a rota já não exponha.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

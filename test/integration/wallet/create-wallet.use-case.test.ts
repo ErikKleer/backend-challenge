@@ -177,6 +177,7 @@ describe("CreateWalletUseCase (PostgreSQL)", () => {
 
   it("leaves the database untouched when a failure happens mid-way", async () => {
     const failingLedger: LedgerRepository = {
+      findPage: (...args) => ctx.ledgerRepo.findPage(...args),
       append: async (_entry: WalletLedgerEntry) => {
         throw new Error("injected ledger failure");
       },

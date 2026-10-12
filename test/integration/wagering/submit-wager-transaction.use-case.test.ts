@@ -497,6 +497,7 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
   describe("atomicity", () => {
     it("persists nothing when a failure follows the ledger append", async () => {
       const failingLedger: LedgerRepository = {
+        findPage: (...args) => ctx.ledgerRepo.findPage(...args),
         append: async (entry: WalletLedgerEntry) => {
           await ctx.ledgerRepo.append(entry);
           throw new Error("injected failure after ledger append");
@@ -678,6 +679,7 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
 
     it("rolls the inbox record back together with a failed processing", async () => {
       const failingLedger: LedgerRepository = {
+        findPage: (...args) => ctx.ledgerRepo.findPage(...args),
         append: async (entry: WalletLedgerEntry) => {
           await ctx.ledgerRepo.append(entry);
           throw new Error("injected failure");
@@ -805,6 +807,7 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
 
     it("applies the effect exactly once when one of two simultaneous identical requests fails", async () => {
       const failingLedger: LedgerRepository = {
+        findPage: (...args) => ctx.ledgerRepo.findPage(...args),
         append: async (entry: WalletLedgerEntry) => {
           await ctx.ledgerRepo.append(entry);
           throw new Error("injected failure after ledger append");
