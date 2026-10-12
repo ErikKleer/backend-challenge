@@ -27,11 +27,11 @@ import type {
   SubmitWagerTransactionOptions,
   SubmitWagerTransactionResult,
 } from "./submit-wager-transaction.command";
+import { WagerSettlementService } from "./wager-settlement.service";
 import {
   WAGER_TRANSACTION_REPOSITORY_TOKEN,
   type WagerTransactionRepository,
 } from "./wager-transaction.repository.port";
-import { WagerSettlementService } from "./wager-settlement.service";
 
 const LOCK_CONFLICT_BY_ERROR_CODE: Readonly<Record<string, LockConflictType>> = {
   LOCK_TIMEOUT: "lock_timeout",
