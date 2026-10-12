@@ -313,6 +313,12 @@ sequenceDiagram
   4. **Ids de rota** que não sejam UUID viram 400 (`UuidParamPipe`) em vez de erro de sintaxe do PostgreSQL (500).
 - **Consequências:** Duas leituras (existência da wallet e página) não formam um snapshot único; é aceitável porque o ledger é append-only e a página nunca muda depois de escrita. O cursor não é assinado: forjá-lo apenas escolhe de onde ler, sem expor dado que a rota já não exponha.
 
+### ADR 20: Consulta de transações por id e por identidade do provedor
+
+- **Contexto:** O provedor precisa descobrir o desfecho de uma transação pelo `transactionId` que recebeu ou, se perdeu a resposta, pela sua própria identidade `(providerId, externalTransactionId)` (README §9).
+- **Decisão:** Duas rotas de leitura sobre a mesma visão (`WagerTransactionView`): `GET /wagering/transactions/:transactionId` e `GET /providers/:providerId/wagering/transactions/:externalTransactionId`. A visão traz `transactionId, providerId, externalTransactionId, status, kind, money, walletId, roundId, balance, createdAt` e, quando existem, `failureCode, referenceTransactionId, processedAt`. `balance` é o saldo **observado** gravado na decisão (o mesmo que o replay devolve), não o saldo atual da wallet. Inexistente ⇒ 404 `TRANSACTION_NOT_FOUND`; `transactionId` que não é UUID, ou `providerId`/`externalTransactionId` vazios ou acima de 128/255 caracteres ⇒ 400. Sem lock, sem transação de escrita; transações `OPENING` também são consultáveis.
+- **Consequências:** Usar o saldo observado mantém a consulta coerente com o replay do `POST` e imutável. Quem quer o saldo corrente lê `GET /wallets/:id`. A rota por provedor usa a unicidade `(provider_id, external_transaction_id)` do schema, sem varredura.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

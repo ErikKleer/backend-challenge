@@ -4,8 +4,10 @@ import {
   PENDING_REFERENCE_POLICY_TOKEN,
   type PendingReferencePolicy,
 } from "./application/pending-reference-policy";
+import { GetWagerTransactionUseCase } from "./application/get-wager-transaction.use-case";
 import { SubmitWagerTransactionUseCase } from "./application/submit-wager-transaction.use-case";
 import { WagerSettlementService } from "./application/wager-settlement.service";
+import { ProviderTransactionsController } from "./presentation/provider-transactions.controller";
 import { WageringController } from "./presentation/wagering.controller";
 
 const pendingReferenceEnvSchema = envSchema.pick({
@@ -15,7 +17,7 @@ const pendingReferenceEnvSchema = envSchema.pick({
 });
 
 @Module({
-  controllers: [WageringController],
+  controllers: [WageringController, ProviderTransactionsController],
   providers: [
     {
       provide: PENDING_REFERENCE_POLICY_TOKEN,
@@ -30,6 +32,7 @@ const pendingReferenceEnvSchema = envSchema.pick({
     },
     WagerSettlementService,
     SubmitWagerTransactionUseCase,
+    GetWagerTransactionUseCase,
   ],
   exports: [SubmitWagerTransactionUseCase, WagerSettlementService],
 })
