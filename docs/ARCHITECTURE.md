@@ -286,7 +286,22 @@ sequenceDiagram
   1. **Header obrigatório.** `Idempotency-Key` ausente ou em branco ⇒ 400 `MISSING_IDEMPOTENCY_KEY` (código próprio, para o provedor distinguir "esqueci o header" de "payload inválido"); acima de 255 caracteres ⇒ 400 `VALIDATION_ERROR`. O `@Headers()` do Nest não aceita pipes, então a validação roda num decorador de parâmetro (`@IdempotencyKey()`); `RequestValidationError` ganhou o `code` para o filtro devolvê-lo.
   2. **Campos de negócio num schema compartilhável** (`wagerTransactionFields` + `refineWagerTransactionRules`): textos não vazios com limite (128; `externalTransactionId` e referência 255), `walletId` UUID, `kind` ∈ `BET|WIN|LOSS|REFUND|ROLLBACK` (**`OPENING` é recusado**: é interno), `REFUND`/`ROLLBACK` exigem `referenceExternalTransactionId`, valor positivo exceto em `LOSS`. A chave de idempotência não faz parte do corpo HTTP; o consumidor SQS comporá o mesmo shape com `data.idempotencyKey`.
   3. **Resposta:** `{ transactionId, status, balance, idempotentReplay, failureCode? }`, sempre com o saldo observado gravado; `failureCode` só aparece em rejeições.
-- **Consequências:** Uma regra nova de entrada vale para HTTP e SQS de uma vez. O corpo não repete a chave: um provedor que envie a mesma chave com outro payload recebe o conflito de idempotência (ADR 16), não uma validação.
+  4. **Mapeamento de status** (o mesmo vale para todos os endpoints; `httpStatusFor` + `DOMAIN_ERROR_HTTP_STATUS`):
+
+     | Situação | Status | Código / corpo |
+     |---|---|---|
+     | `PROCESSED`, primeira vez | 201 | `status: "PROCESSED"` |
+     | `PROCESSED`, replay | 200 | `idempotentReplay: true` |
+     | `PENDING_REFERENCE` (1ª vez ou replay) | 202 | aceito; o worker reprocessa |
+     | `REJECTED` (1ª vez ou replay) | 422 | `status: "REJECTED"`, `failureCode` |
+     | Payload inválido / header ausente | 400 | `VALIDATION_ERROR` / `MISSING_IDEMPOTENCY_KEY` |
+     | Mesma key com payload diferente, ou mesmo `(provider, external id)` com outra key | 409 | `IDEMPOTENCY_CONFLICT` |
+     | Wallet inexistente | 404 | `WALLET_NOT_FOUND` |
+     | Lock timeout, deadlock, conflito de versão, banco fora | 503 + `Retry-After` | `TRANSIENT_FAILURE` |
+     | Inesperado | 500 | `INTERNAL_ERROR` |
+
+     Rejeição de negócio é 422, não 4xx de formato nem 409: o payload é válido e a decisão é definitiva, então reenviar a mesma chave devolve o mesmo 422. `PENDING_REFERENCE` é 202 porque nada foi recusado nem concluído; o provedor consulta ou aguarda o evento. Só o 503 convida a repetir a mesma requisição. Um `FAILED` replayado (não produzido por este fluxo) também sai como 422.
+- **Consequências:** Uma regra nova de entrada vale para HTTP e SQS de uma vez. O corpo não repete a chave: um provedor que envie a mesma chave com outro payload recebe o conflito de idempotência (ADR 16), não uma validação. O provedor decide reenviar, corrigir ou desistir só pelo status e pelo `code`, sem interpretar mensagens.
 
 ### Modelo de Dados (Diagrama ER)
 
