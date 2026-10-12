@@ -17,6 +17,8 @@ COPY --from=builder /app/src ./src
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/migrations ./migrations
 COPY --from=builder /app/package.json ./package.json
+# O Bun lê experimentalDecorators daqui; sem o arquivo os decorators do Nest quebram no boot.
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/mikro-orm.config.ts ./mikro-orm.config.ts
 
 EXPOSE 3000
