@@ -3,6 +3,7 @@ import { Money } from "../../src/shared/domain/money";
 import { AppLogger } from "../../src/shared/infrastructure/observability/app-logger";
 import { MetricsService } from "../../src/shared/infrastructure/observability/metrics.service";
 import { CreateWalletUseCase } from "../../src/wallet/application/create-wallet.use-case";
+import type { OutboxRepository } from "../../src/messaging/application/outbox.repository.port";
 import type { LedgerRepository } from "../../src/wallet/application/ledger.repository.port";
 import type { PendingReferencePolicy } from "../../src/wagering/application/pending-reference-policy";
 import type { SubmitWagerTransactionCommand } from "../../src/wagering/application/submit-wager-transaction.command";
@@ -27,6 +28,7 @@ export interface WalletFixture {
 export interface WageringHarnessOverrides {
   /** Wrapper com falha injetada em volta do repositório real. */
   ledger?: LedgerRepository;
+  outbox?: OutboxRepository;
 }
 
 /**
@@ -47,6 +49,7 @@ export class WageringHarness {
       ctx.walletRepo,
       ctx.transactionRepo,
       overrides.ledger ?? ctx.ledgerRepo,
+      overrides.outbox ?? ctx.outboxRepo,
       ctx.idGenerator,
       TEST_PENDING_POLICY,
     );

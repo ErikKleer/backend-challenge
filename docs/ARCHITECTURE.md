@@ -270,6 +270,15 @@ sequenceDiagram
     end
 ```
 
+### ADR 17: Eventos de integração gravados dentro da transação financeira
+
+- **Contexto:** Um evento publicado antes do commit (ou perdido depois dele) é falha eliminatória (README §5, §11). O estado final da transação e os eventos precisam ser confirmados juntos.
+- **Decisão:**
+  1. `WagerSettlementService` enfileira os eventos na outbox **depois** de gravar o estado final e **dentro** do mesmo `UnitOfWork.run`; nenhum código publica no broker. Falha em qualquer ponto (inclusive logo após o `enqueue`) desfaz saldo, ledger, transação e eventos juntos, o que os testes provam com falha injetada em volta do ledger e da outbox reais.
+  2. **Quais eventos:** `PROCESSED` ⇒ `WagerTransactionProcessed`, mais `WalletBalanceChanged` quando houve lançamento (`LOSS` só emite o primeiro); `REJECTED` ⇒ `WagerTransactionRejected`; `PENDING_REFERENCE` ⇒ `WagerTransactionPendingReference`. Replay não emite nada: os `eventId` são determinísticos por (transação, tipo) e o `ON CONFLICT DO NOTHING` da outbox descartaria a duplicata de qualquer forma.
+  3. **Correlação:** `correlationId` vem do contexto de execução (gerado se ausente) e `causationId` é o `messageId` da mensagem SQS, quando houver.
+- **Consequências:** A latência da requisição inclui os `INSERT`s da outbox, e o consumidor recebe a defasagem do publisher (`outbox_lag_seconds`), nunca um evento sem commit correspondente.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

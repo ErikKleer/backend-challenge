@@ -1,12 +1,20 @@
 import { Inject } from "@nestjs/common";
+import { OUTBOX_REPOSITORY_TOKEN, type OutboxRepository } from "../../messaging/application/outbox.repository.port";
+import type { EventContext } from "../../messaging/domain/integration-event";
+import { OutboxMessage } from "../../messaging/domain/outbox-message";
+import { WagerTransactionPendingReference } from "../../messaging/domain/wager-transaction-pending-reference.event";
+import { WagerTransactionProcessed } from "../../messaging/domain/wager-transaction-processed.event";
+import { WagerTransactionRejected } from "../../messaging/domain/wager-transaction-rejected.event";
+import { WalletBalanceChanged } from "../../messaging/domain/wallet-balance-changed.event";
 import { ID_GENERATOR_TOKEN, type IdGenerator } from "../../shared/application/id-generator.port";
 import { WalletNotFoundError } from "../../shared/domain/domain.error";
 import { LEDGER_REPOSITORY_TOKEN, type LedgerRepository } from "../../wallet/application/ledger.repository.port";
 import { WALLET_REPOSITORY_TOKEN, type WalletRepository } from "../../wallet/application/wallet.repository.port";
 import type { Wallet } from "../../wallet/domain/wallet";
-import { LedgerDirection } from "../../wallet/domain/wallet-ledger-entry";
+import { LedgerDirection, type WalletLedgerEntry } from "../../wallet/domain/wallet-ledger-entry";
 import { SettlementPolicy, type SettlementDecision } from "../domain/settlement-policy";
 import type { WagerTransaction } from "../domain/wager-transaction";
+import { WagerTransactionStatus } from "../domain/wager-transaction-types";
 import {
   PENDING_REFERENCE_POLICY_TOKEN,
   type PendingReferencePolicy,
@@ -18,7 +26,8 @@ import {
 
 /**
  * Liquida uma transação já persistida: trava a wallet, resolve a referência, decide
- * pela `SettlementPolicy` e aplica a decisão (saldo, ledger e estado da transação).
+ * pela `SettlementPolicy`, aplica a decisão (saldo, ledger e estado da transação) e
+ * enfileira os eventos de integração na outbox.
  *
  * Deve rodar dentro de um `UnitOfWork.run`. Toda escrita de saldo passa por
  * `findByIdForUpdate` + `updateBalance`: o lock de linha serializa as transações da
@@ -29,11 +38,12 @@ export class WagerSettlementService {
     @Inject(WALLET_REPOSITORY_TOKEN) private readonly wallets: WalletRepository,
     @Inject(WAGER_TRANSACTION_REPOSITORY_TOKEN) private readonly transactions: WagerTransactionRepository,
     @Inject(LEDGER_REPOSITORY_TOKEN) private readonly ledger: LedgerRepository,
+    @Inject(OUTBOX_REPOSITORY_TOKEN) private readonly outbox: OutboxRepository,
     @Inject(ID_GENERATOR_TOKEN) private readonly ids: IdGenerator,
     @Inject(PENDING_REFERENCE_POLICY_TOKEN) private readonly pendingPolicy: PendingReferencePolicy,
   ) {}
 
-  public async settle(transaction: WagerTransaction, now: Date): Promise<void> {
+  public async settle(transaction: WagerTransaction, context: EventContext): Promise<void> {
     // O lock vem antes de qualquer leitura que alimente a decisão: referência e
     // reversão existente são lidas já sob o lock da wallet.
     const wallet = await this.wallets.findByIdForUpdate(transaction.walletId);
@@ -56,7 +66,8 @@ export class WagerSettlementService {
       existingReversal: existingReversal ?? undefined,
     });
 
-    await this.apply(decision, transaction, wallet, reference, now);
+    const entry = await this.apply(decision, transaction, wallet, reference, context.now);
+    await this.enqueueEvents(transaction, wallet, entry, context);
   }
 
   private async apply(
@@ -65,7 +76,8 @@ export class WagerSettlementService {
     wallet: Wallet,
     reference: WagerTransaction | null,
     now: Date,
-  ): Promise<void> {
+  ): Promise<WalletLedgerEntry | undefined> {
+    let entry: WalletLedgerEntry | undefined;
     switch (decision.type) {
       case "APPLY": {
         const expectedVersion = wallet.version;
@@ -75,7 +87,7 @@ export class WagerSettlementService {
           money: decision.money,
           at: now,
         };
-        const entry =
+        entry =
           decision.direction === LedgerDirection.Debit
             ? wallet.debit(operation)
             : wallet.credit(operation);
@@ -98,5 +110,41 @@ export class WagerSettlementService {
         break;
     }
     await this.transactions.save(transaction, now);
+    return entry;
+  }
+
+  /**
+   * Os eventos entram na outbox na mesma transação SQL do efeito financeiro: se o
+   * commit falhar, nenhum evento existe. O `WalletBalanceChanged` só sai quando houve
+   * lançamento, isto é, quando o saldo de fato mudou.
+   */
+  private async enqueueEvents(
+    transaction: WagerTransaction,
+    wallet: Wallet,
+    entry: WalletLedgerEntry | undefined,
+    context: EventContext,
+  ): Promise<void> {
+    switch (transaction.status) {
+      case WagerTransactionStatus.Processed:
+        await this.outbox.enqueue(
+          OutboxMessage.enqueue(WagerTransactionProcessed.from(transaction, context)),
+        );
+        if (entry) {
+          await this.outbox.enqueue(
+            OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, entry, context)),
+          );
+        }
+        break;
+      case WagerTransactionStatus.Rejected:
+        await this.outbox.enqueue(
+          OutboxMessage.enqueue(WagerTransactionRejected.from(transaction, context)),
+        );
+        break;
+      case WagerTransactionStatus.PendingReference:
+        await this.outbox.enqueue(
+          OutboxMessage.enqueue(WagerTransactionPendingReference.from(transaction, context)),
+        );
+        break;
+    }
   }
 }

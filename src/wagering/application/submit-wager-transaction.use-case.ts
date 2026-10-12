@@ -10,7 +10,7 @@ import {
   WalletNotFoundError,
 } from "../../shared/domain/domain.error";
 import { AppLogger } from "../../shared/infrastructure/observability/app-logger";
-import { bindContext } from "../../shared/infrastructure/observability/execution-context";
+import { bindContext, getContext } from "../../shared/infrastructure/observability/execution-context";
 import {
   type LockConflictType,
   type MetricSource,
@@ -137,7 +137,11 @@ export class SubmitWagerTransactionUseCase {
     }
     bindContext({ transactionId: transaction.id });
 
-    await this.settlement.settle(transaction, now);
+    await this.settlement.settle(transaction, {
+      correlationId: getContext()?.correlationId ?? this.ids.generate(),
+      causationId: options.inbox?.messageId,
+      now,
+    });
 
     if (inboxMessage) {
       inboxMessage.markProcessed(now);

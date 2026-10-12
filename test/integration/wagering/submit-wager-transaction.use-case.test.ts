@@ -7,6 +7,9 @@ import {
   WagerTransactionKind,
   WagerTransactionStatus,
 } from "../../../src/wagering/domain/wager-transaction-types";
+import type { OutboxRepository } from "../../../src/messaging/application/outbox.repository.port";
+import { deriveEventId } from "../../../src/messaging/domain/event-id";
+import type { OutboxMessage } from "../../../src/messaging/domain/outbox-message";
 import type { LedgerRepository } from "../../../src/wallet/application/ledger.repository.port";
 import type { WalletLedgerEntry } from "../../../src/wallet/domain/wallet-ledger-entry";
 import { createBarrier } from "../../support/barrier";
@@ -62,6 +65,45 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
       [walletId],
     );
     return row!;
+  }
+
+  interface StoredEvent {
+    id: string;
+    type: string;
+    aggregate: string;
+    data: Record<string, unknown>;
+    causationId?: string;
+  }
+
+  /** Eventos da outbox ligados a uma transação (os do `OPENING` da wallet ficam de fora). */
+  async function eventsOf(transactionId: string): Promise<StoredEvent[]> {
+    const rows = await db.orm.em.execute<
+      Array<{
+        id: string;
+        event_type: string;
+        aggregate_id: string;
+        payload: { data: Record<string, unknown>; causationId?: string };
+      }>
+    >(
+      `SELECT id, event_type, aggregate_id, payload FROM outbox_messages
+        WHERE payload->'data'->>'transactionId' = ? ORDER BY event_type`,
+      [transactionId],
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      type: row.event_type,
+      aggregate: row.aggregate_id,
+      data: row.payload.data,
+      causationId: row.payload.causationId,
+    }));
+  }
+
+  async function outboxCount(walletId: string): Promise<number> {
+    const [row] = await db.orm.em.execute<Array<{ n: string }>>(
+      "SELECT COUNT(*) AS n FROM outbox_messages WHERE aggregate_id = ?",
+      [walletId],
+    );
+    return Number(row!.n);
   }
 
   async function countTransactions(walletId: string): Promise<number> {
@@ -461,6 +503,7 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
       };
       const failing = new WageringHarness(ctx, { ledger: failingLedger });
       const wallet = await harness.createWallet("100.00");
+      const openingEvents = await outboxCount(wallet.walletId);
       const command = harness.command(wallet, { money: brl("30.00") });
 
       await expect(failing.useCase.execute(command)).rejects.toThrow("injected failure after ledger append");
@@ -468,6 +511,7 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
       expect(await walletOf(wallet.walletId)).toEqual({ balance: "100.00", version: 1 });
       expect(await ledgerOf(wallet.walletId)).toEqual([]);
       expect(await countTransactions(wallet.walletId)).toBe(0);
+      expect(await outboxCount(wallet.walletId)).toBe(openingEvents);
       expect(await failing.metrics.render()).not.toContain("wager_transactions_total{");
       await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
 
@@ -475,6 +519,120 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
       const retry = await submit(command);
       expect(retry.idempotentReplay).toBe(false);
       expect(retry.balance.amount).toBe("70.00");
+    });
+  });
+
+  describe("outbox events", () => {
+    it("emits WagerTransactionProcessed and WalletBalanceChanged for a processed BET", async () => {
+      const wallet = await harness.createWallet("100.00");
+
+      const result = await submit(harness.command(wallet, { money: brl("30.00") }));
+
+      const events = await eventsOf(result.transactionId);
+      expect(events.map((event) => event.type)).toEqual(["WagerTransactionProcessed", "WalletBalanceChanged"]);
+      for (const event of events) {
+        expect(event.aggregate).toBe(wallet.walletId);
+        expect(event.id).toBe(deriveEventId(result.transactionId, event.type));
+      }
+      expect(events[0]?.data.observedBalance).toEqual({ amount: "70.00", currency: "BRL" });
+      expect(events[1]?.data).toMatchObject({
+        direction: "DEBIT",
+        balanceBefore: { amount: "100.00", currency: "BRL" },
+        balanceAfter: { amount: "70.00", currency: "BRL" },
+        walletVersion: 2,
+      });
+    });
+
+    it("emits only WagerTransactionProcessed for a LOSS", async () => {
+      const wallet = await harness.createWallet("100.00");
+
+      const result = await submit(harness.command(wallet, { kind: Loss, money: brl("0.00") }));
+
+      expect((await eventsOf(result.transactionId)).map((event) => event.type)).toEqual([
+        "WagerTransactionProcessed",
+      ]);
+    });
+
+    it("emits WagerTransactionRejected with the failure code for a rejection", async () => {
+      const wallet = await harness.createWallet("10.00");
+
+      const result = await submit(harness.command(wallet, { money: brl("80.00") }));
+
+      const events = await eventsOf(result.transactionId);
+      expect(events.map((event) => event.type)).toEqual(["WagerTransactionRejected"]);
+      expect(events[0]?.data.failureCode).toBe("INSUFFICIENT_FUNDS");
+    });
+
+    it("emits WagerTransactionPendingReference when the reference is missing", async () => {
+      const wallet = await harness.createWallet("100.00");
+
+      const result = await submit(
+        harness.command(wallet, { kind: Refund, referenceExternalTransactionId: "missing-ref" }),
+      );
+
+      const events = await eventsOf(result.transactionId);
+      expect(events.map((event) => event.type)).toEqual(["WagerTransactionPendingReference"]);
+      expect(events[0]?.data.referenceExternalTransactionId).toBe("missing-ref");
+    });
+
+    it("emits events for a reversal like for any other applied transaction", async () => {
+      const wallet = await harness.createWallet("100.00");
+      await submit(harness.command(wallet, { externalTransactionId: "bet-ev", money: brl("20.00") }));
+
+      const result = await submit(
+        harness.command(wallet, { kind: Refund, money: brl("20.00"), referenceExternalTransactionId: "bet-ev" }),
+      );
+
+      expect((await eventsOf(result.transactionId)).map((event) => event.type)).toEqual([
+        "WagerTransactionProcessed",
+        "WalletBalanceChanged",
+      ]);
+    });
+
+    it("emits nothing more for a replay", async () => {
+      const wallet = await harness.createWallet("100.00");
+      const command = harness.command(wallet);
+      await submit(command);
+      const before = await outboxCount(wallet.walletId);
+
+      await submit(command);
+
+      expect(await outboxCount(wallet.walletId)).toBe(before);
+    });
+
+    it("records the SQS message id as the causation of the events", async () => {
+      const wallet = await harness.createWallet("100.00");
+
+      const result = await harness.useCase.execute(harness.command(wallet), {
+        inbox: { consumerName: "wager-transactions-consumer", messageId: "msg-cause", payloadHash: "e".repeat(64) },
+      });
+
+      const events = await eventsOf(result.transactionId);
+      expect(events.map((event) => event.causationId)).toEqual(["msg-cause", "msg-cause"]);
+    });
+
+    it("rolls the wallet, ledger and transaction back when a failure follows the enqueue", async () => {
+      const failingOutbox: OutboxRepository = {
+        enqueue: async (message: OutboxMessage) => {
+          await ctx.outboxRepo.enqueue(message);
+          throw new Error("injected failure after enqueue");
+        },
+        claimDue: (now, limit) => ctx.outboxRepo.claimDue(now, limit),
+        save: (message) => ctx.outboxRepo.save(message),
+      };
+      const failing = new WageringHarness(ctx, { outbox: failingOutbox });
+      const wallet = await harness.createWallet("100.00");
+      const openingEvents = await outboxCount(wallet.walletId);
+
+      await expect(failing.useCase.execute(failing.command(wallet))).rejects.toThrow(
+        "injected failure after enqueue",
+      );
+
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "100.00", version: 1 });
+      expect(await ledgerOf(wallet.walletId)).toEqual([]);
+      expect(await countTransactions(wallet.walletId)).toBe(0);
+      expect(await outboxCount(wallet.walletId)).toBe(openingEvents);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
     });
   });
 
