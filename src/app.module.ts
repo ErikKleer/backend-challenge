@@ -5,6 +5,7 @@ import { AuthModule } from "./auth/auth.module";
 import { ObservabilityModule } from "./shared/infrastructure/observability/observability.module";
 import { PersistenceModule } from "./shared/infrastructure/persistence/persistence.module";
 import { PresentationModule } from "./shared/presentation/presentation.module";
+import { WageringModule } from "./wagering/wagering.module";
 import { WalletModule } from "./wallet/wallet.module";
 
 /**
@@ -12,7 +13,7 @@ import { WalletModule } from "./wallet/wallet.module";
  * combinam com um `PersistenceModule` apontado para o banco de teste.
  */
 @Module({
-  imports: [AuthModule, PresentationModule, WalletModule],
+  imports: [AuthModule, PresentationModule, WalletModule, WageringModule],
 })
 export class ApiModule {}
 

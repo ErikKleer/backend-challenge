@@ -279,6 +279,15 @@ sequenceDiagram
   3. **Correlação:** `correlationId` vem do contexto de execução (gerado se ausente) e `causationId` é o `messageId` da mensagem SQS, quando houver.
 - **Consequências:** A latência da requisição inclui os `INSERT`s da outbox, e o consumidor recebe a defasagem do publisher (`outbox_lag_seconds`), nunca um evento sem commit correspondente.
 
+### ADR 18: `POST /wagering/transactions` — contrato de entrada
+
+- **Contexto:** O endpoint e o consumidor SQS (futuro) precisam aceitar exatamente os mesmos campos com as mesmas regras, e o header `Idempotency-Key` é a fonte da verdade da idempotência (README §9).
+- **Decisão:**
+  1. **Header obrigatório.** `Idempotency-Key` ausente ou em branco ⇒ 400 `MISSING_IDEMPOTENCY_KEY` (código próprio, para o provedor distinguir "esqueci o header" de "payload inválido"); acima de 255 caracteres ⇒ 400 `VALIDATION_ERROR`. O `@Headers()` do Nest não aceita pipes, então a validação roda num decorador de parâmetro (`@IdempotencyKey()`); `RequestValidationError` ganhou o `code` para o filtro devolvê-lo.
+  2. **Campos de negócio num schema compartilhável** (`wagerTransactionFields` + `refineWagerTransactionRules`): textos não vazios com limite (128; `externalTransactionId` e referência 255), `walletId` UUID, `kind` ∈ `BET|WIN|LOSS|REFUND|ROLLBACK` (**`OPENING` é recusado**: é interno), `REFUND`/`ROLLBACK` exigem `referenceExternalTransactionId`, valor positivo exceto em `LOSS`. A chave de idempotência não faz parte do corpo HTTP; o consumidor SQS comporá o mesmo shape com `data.idempotencyKey`.
+  3. **Resposta:** `{ transactionId, status, balance, idempotentReplay, failureCode? }`, sempre com o saldo observado gravado; `failureCode` só aparece em rejeições.
+- **Consequências:** Uma regra nova de entrada vale para HTTP e SQS de uma vez. O corpo não repete a chave: um provedor que envie a mesma chave com outro payload recebe o conflito de idempotência (ADR 16), não uma validação.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

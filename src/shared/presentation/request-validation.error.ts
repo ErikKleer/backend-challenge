@@ -11,6 +11,7 @@ export class RequestValidationError extends Error {
   constructor(
     message: string,
     public readonly issues: ValidationIssue[],
+    public readonly code: string = "VALIDATION_ERROR",
   ) {
     super(message);
     this.name = "RequestValidationError";

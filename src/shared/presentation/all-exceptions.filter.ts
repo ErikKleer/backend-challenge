@@ -67,7 +67,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     });
 
     if (exception instanceof RequestValidationError) {
-      return respond(400, "VALIDATION_ERROR", exception.message, exception.issues);
+      return respond(400, exception.code, exception.message, exception.issues);
     }
 
     if (exception instanceof DomainError) {
