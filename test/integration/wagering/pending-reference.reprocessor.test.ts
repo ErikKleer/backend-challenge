@@ -105,6 +105,19 @@ describe("PendingReferenceReprocessor (PostgreSQL)", () => {
     return rows.map((row) => row.event_type);
   }
 
+  /** Contagem do rótulo exato de rejeição por referência ausente em `wager_transactions_total`. */
+  async function rejectedNotFoundCount(target: WageringHarness): Promise<number> {
+    const { values } = await target.metrics.registry.getSingleMetric("wager_transactions_total")!.get();
+    return (
+      values.find(
+        (entry) =>
+          entry.labels.kind === "REFUND" &&
+          entry.labels.status === "REJECTED" &&
+          entry.labels.failure_code === FailureCode.ReferenceNotFound,
+      )?.value ?? 0
+    );
+  }
+
   function pendingReversal(wallet: WalletFixture, kind: SubmittableKind, reference: string, amount = "10.00") {
     return harness.command(wallet, {
       kind,
@@ -257,5 +270,74 @@ describe("PendingReferenceReprocessor (PostgreSQL)", () => {
     expect(await walletOf(wallet.walletId)).toEqual({ balance: "100.00", version: 3 });
     expect(await ledgerKinds(wallet.walletId)).toEqual(["DEBIT 10.00", "CREDIT 10.00"]);
     await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
+  });
+
+  describe("reference that never arrives", () => {
+    const EXHAUSTING = { baseDelayMs: 10, maxDelayMs: 40, maxAttempts: 3 };
+
+    it("rejects with REFERENCE_NOT_FOUND after the last attempt, with an event and no ledger entry", async () => {
+      const exhausting = new WageringHarness(ctx, { pendingPolicy: EXHAUSTING, clock });
+      const wallet = await exhausting.createWallet("100.00");
+      const command = pendingReversal(wallet, Refund, "ghost-bet");
+      const refund = await exhausting.useCase.execute(command);
+
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        advance(EXHAUSTING.maxDelayMs + 1);
+        await exhausting.reprocessor.runOnce();
+        expect(await storedOf(refund.transactionId)).toMatchObject({
+          status: "PENDING_REFERENCE",
+          attempts: attempt,
+        });
+      }
+
+      advance(EXHAUSTING.maxDelayMs + 1);
+      await exhausting.reprocessor.runOnce();
+
+      expect(await storedOf(refund.transactionId)).toMatchObject({
+        status: "REJECTED",
+        failure_code: FailureCode.ReferenceNotFound,
+        attempts: 3,
+        next_attempt_at: null,
+        observed_balance: "100.00",
+      });
+      expect(await eventTypes(refund.transactionId)).toEqual([
+        "WagerTransactionPendingReference",
+        "WagerTransactionRejected",
+      ]);
+      expect(await ledgerKinds(wallet.walletId)).toEqual([]);
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "100.00", version: 1 });
+      expect(await rejectedNotFoundCount(exhausting)).toBe(1);
+
+      // Rejeição definitiva: nada mais é reclamado e o replay devolve o resultado final
+      advance(EXHAUSTING.maxDelayMs + 1);
+      expect((await exhausting.reprocessor.runOnce()).claimed).toBe(0);
+      const replay = await exhausting.useCase.execute(command);
+      expect(replay).toMatchObject({
+        status: WagerTransactionStatus.Rejected,
+        failureCode: FailureCode.ReferenceNotFound,
+        idempotentReplay: true,
+      });
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
+    });
+
+    it("does not reject early: a reference that shows up on the last attempt still wins", async () => {
+      const exhausting = new WageringHarness(ctx, { pendingPolicy: EXHAUSTING, clock });
+      const wallet = await exhausting.createWallet("100.00");
+      const refund = await exhausting.useCase.execute(pendingReversal(wallet, Refund, "late-bet"));
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        advance(EXHAUSTING.maxDelayMs + 1);
+        await exhausting.reprocessor.runOnce();
+      }
+
+      await exhausting.useCase.execute(
+        exhausting.command(wallet, { externalTransactionId: "late-bet", kind: Bet }),
+      );
+      advance(EXHAUSTING.maxDelayMs + 1);
+      await exhausting.reprocessor.runOnce();
+
+      expect((await storedOf(refund.transactionId)).status).toBe("PROCESSED");
+      expect(await walletOf(wallet.walletId)).toMatchObject({ balance: "100.00" });
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
+    });
   });
 });

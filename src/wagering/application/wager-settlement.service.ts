@@ -14,7 +14,7 @@ import type { Wallet } from "../../wallet/domain/wallet";
 import { LedgerDirection, type WalletLedgerEntry } from "../../wallet/domain/wallet-ledger-entry";
 import { SettlementPolicy, type SettlementDecision } from "../domain/settlement-policy";
 import type { WagerTransaction } from "../domain/wager-transaction";
-import { WagerTransactionStatus } from "../domain/wager-transaction-types";
+import { FailureCode, WagerTransactionStatus } from "../domain/wager-transaction-types";
 import {
   PENDING_REFERENCE_POLICY_TOKEN,
   type PendingReferencePolicy,
@@ -107,6 +107,10 @@ export class WagerSettlementService {
           // Reprocessamento: a referência ainda não está resolvida, recua o backoff
           const attempts = transaction.referenceAttempts + 1;
           transaction.scheduleReferenceRetry(new Date(now.getTime() + this.backoffDelayMs(attempts)));
+          if (attempts >= this.pendingPolicy.maxAttempts) {
+            // Esgotou: a tentativa fica contada (auditoria) e a espera é encerrada pela rejeição
+            transaction.reject(FailureCode.ReferenceNotFound, wallet.balance);
+          }
         } else {
           transaction.markPendingReference(
             wallet.balance,
