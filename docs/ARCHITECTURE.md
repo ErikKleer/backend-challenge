@@ -228,6 +228,48 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
   8. **Observabilidade:** um log `wallet created` por criação (ids e moeda, sem valores) e `wager_transactions_total{kind="OPENING",status="PROCESSED"}`, ambos depois do commit.
 - **Consequências:** A invariante saldo = soma do ledger vale desde a criação, e quem audita ou reconcilia não precisa tratar wallets nascidas com saldo como caso especial. O custo é uma transação e um par de eventos a mais por criação com saldo; consumidores devem aceitar `kind = OPENING` e `providerId = "internal"` nos eventos.
 
+### ADR 16: SubmitWagerTransaction — idempotência persistente e concorrência por wallet
+
+- **Contexto:** O caso de uso é compartilhado por HTTP e SQS e concentra as restrições mais pesadas (README §5, §8): nenhuma instância pode confiar em memória, duas apostas simultâneas não podem gastar o mesmo saldo e uma repetição nunca pode debitar duas vezes.
+- **Decisão:**
+  1. **Um único `UnitOfWork.run`** (READ COMMITTED, `lock_timeout`) cobre a inbox (quando a entrada é SQS), a transação, o saldo, o ledger e o estado final. A ordem é: hash do payload → `inbox.tryReceive` → wallet existe → `INSERT … ON CONFLICT DO NOTHING` da transação `PENDING` → `FOR NO KEY UPDATE` na wallet → referência e reversão existente → `SettlementPolicy.decide` → aplicação → `inbox.markProcessed`. Os passos de lock em diante vivem em `WagerSettlementService`, que recebe a transação já carregada e será reutilizado no reprocessamento de pendentes.
+  2. **A transação é inserida antes do lock.** A decisão de idempotência é do `UNIQUE` do banco, não de uma leitura prévia: se o `INSERT` não grava, a transação existente é lida e comparada (mesma key e mesmo `payloadHash` ⇒ replay; hash diferente, ou mesmo `(provider, external id)` sob outra key ⇒ `IdempotencyConflictError`, 409). Assim um replay nunca disputa o lock da wallet, e duas requisições idênticas simultâneas se resolvem no índice: a segunda espera o commit da primeira e então lê o resultado gravado. Uma linha `PENDING` visível a outra transação indica estado anômalo e vira erro transitório.
+  3. **Estratégia de concorrência: lock pessimista por wallet + versão como guarda + `CHECK (balance >= 0)`.** `SELECT … FOR NO KEY UPDATE` serializa as transações da mesma wallet (wallets diferentes não se bloqueiam); `UPDATE … WHERE version = ?` é a segunda guarda e o `CHECK` do schema, a terceira. Nada de lock global. Toda escrita de saldo passa por `findByIdForUpdate` + `updateBalance`.
+  4. **`FOR NO KEY UPDATE`, não `FOR UPDATE`.** O `INSERT` da transação toma `FOR KEY SHARE` na wallet (FK) e `FOR UPDATE` conflita com esse modo: duas requisições da mesma wallet que já inseriram a transação entram em deadlock ao pedir o lock (reproduzido em `wallet-lock-fk-deadlock.test.ts`). `FOR NO KEY UPDATE` também serializa os escritores, pois o `UPDATE` de saldo não altera a chave, mas é compatível com `FOR KEY SHARE`.
+  5. **Alternativas descartadas:** (a) *optimistic locking com retry*: sob disputa na mesma wallet quase toda tentativa perde e o retry multiplica leituras e ruído; o resultado fica dependente de sorte e o retry interno silencioso foi vetado. (b) *update atômico condicionado* (`UPDATE … SET balance = balance - x WHERE balance >= x`): resolve só a aposta simples; reversões dependem da transação referenciada e da inexistência de outra reversão, e a rejeição precisa do saldo observado para o replay, o que exige ler sob lock de qualquer forma. (c) *lock antes do insert*: faz o replay esperar a wallet e não elimina a corrida de idempotência entre wallets.
+  6. **Resultado.** `REJECTED` e `PENDING_REFERENCE` são resultados commitados (a rejeição fica auditável, sem tocar saldo nem versão); conflito, wallet inexistente e falha transitória são exceções, que desfazem a transação. O saldo devolvido é o `observed_balance` gravado, então o replay devolve o saldo da época, não o atual.
+  7. **Falhas transitórias** (`LockTimeoutError`, deadlock, conflito de versão) propagam como `TransientInfrastructureError` sem retry interno e são contadas em `wallet_lock_conflicts_total`; quem decide repetir é o chamador (503 no HTTP, redelivery no SQS). Métricas de sucesso e o log da transação rodam em `afterCommit`.
+  8. **Inbox:** uma mensagem já recebida devolve o resultado gravado por `idempotencyKey` (com a mesma checagem de hash) sem reprocessar; se a inbox existir mas a transação não, o fluxo normal segue.
+  9. **Backoff de referências pendentes** em configuração (`PENDING_REFERENCE_BASE_DELAY_MS=2000`, `…_MAX_DELAY_MS=60000`, `…_MAX_ATTEMPTS=8`): a primeira espera é `now + base`.
+- **Consequências:** Uma wallet muito disputada vira fila no lock; `lock_timeout` curto troca espera longa por 503 explícito. O custo da inserção antes do lock é uma linha `PENDING` dentro de uma transação que pode ser desfeita; como é tudo uma transação só, nenhum `PENDING` fica órfão.
+
+```mermaid
+sequenceDiagram
+    participant C as Cliente (HTTP/SQS)
+    participant U as SubmitWagerTransaction
+    participant DB as PostgreSQL
+    C->>U: comando (+ inbox opcional)
+    U->>DB: BEGIN (lock_timeout)
+    opt entrada SQS
+        U->>DB: INSERT inbox ON CONFLICT DO NOTHING
+    end
+    U->>DB: wallet existe?
+    U->>DB: INSERT transação PENDING ON CONFLICT DO NOTHING
+    alt não inseriu
+        U->>DB: busca por key / (provider, external id)
+        U-->>C: replay (mesma key e hash) ou 409 conflito
+    else inseriu
+        U->>DB: SELECT wallet FOR NO KEY UPDATE
+        U->>DB: referência e reversão existente
+        Note over U: SettlementPolicy.decide
+        U->>DB: UPDATE wallet WHERE version = ? e INSERT ledger (APPLY)
+        U->>DB: UPDATE transação (estado final + saldo observado)
+        U->>DB: UPDATE inbox processed_at
+        U->>DB: COMMIT
+        U-->>C: resultado (saldo observado)
+    end
+```
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

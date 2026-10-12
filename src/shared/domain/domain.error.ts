@@ -133,3 +133,15 @@ export class TransactionNotFoundError extends DomainError {
     super(`Transaction '${reference}' was not found`);
   }
 }
+
+/**
+ * Lançado quando a chave de idempotência (ou o par provedor + id externo) já pertence a
+ * uma transação com conteúdo diferente. Nunca é replay: o provedor reutilizou a chave.
+ */
+export class IdempotencyConflictError extends DomainError {
+  public readonly code = "IDEMPOTENCY_CONFLICT";
+
+  constructor(message: string) {
+    super(message);
+  }
+}

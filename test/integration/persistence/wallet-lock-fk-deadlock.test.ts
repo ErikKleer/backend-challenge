@@ -3,27 +3,12 @@ import { Money } from "../../../src/shared/domain/money";
 import { WagerTransaction } from "../../../src/wagering/domain/wager-transaction";
 import { WagerTransactionKind } from "../../../src/wagering/domain/wager-transaction-types";
 import { Wallet } from "../../../src/wallet/domain/wallet";
+import { createBarrier } from "../../support/barrier";
 import { createTestDatabase, type TestDatabaseContext } from "../../support/database";
 import {
   createPersistenceTestContext,
   type PersistenceTestContext,
 } from "../../support/persistence";
-
-/** Libera todos os participantes ao mesmo tempo quando o último chega. */
-function createBarrier(parties: number): () => Promise<void> {
-  let arrived = 0;
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return async () => {
-    arrived += 1;
-    if (arrived === parties) {
-      release();
-    }
-    await gate;
-  };
-}
 
 describe("wallet row lock vs. foreign-key locks (PostgreSQL)", () => {
   let db: TestDatabaseContext;
