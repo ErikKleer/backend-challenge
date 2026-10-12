@@ -70,6 +70,7 @@ Camadas por módulo (`wallet`, `wagering`, `messaging`, `shared`): `domain` (pur
 | Autenticação (não implementada: desenho e ponto de extensão) | ADR 13 |
 | Testes com processos reais e falhas injetadas | ADR 22, 27 |
 | Interpretações adotadas | [Interpretações adotadas](#interpretações-adotadas) |
+| Rastreabilidade (§5 e §14 do enunciado ⇒ código ⇒ teste) | [Rastreabilidade](#rastreabilidade-restrições-invioláveis-e-falhas-eliminatórias) |
 | Limitações e próximos passos | [Limitações conhecidas](#limitações-conhecidas-e-o-que-seria-feito-com-mais-tempo) |
 
 ## Decisões (ADRs)
@@ -704,4 +705,35 @@ O enunciado deixa pontos em aberto; em cada um escolheu-se a leitura financeiram
 6. **Retenção e arquivamento** da outbox e da inbox, e reconciliação periódica com alerta.
 7. **Circuit breaker** no consumidor e lote com tolerância a item defeituoso no worker de pendentes.
 8. **Reversão parcial** e `ROLLBACK` encadeado, caso o negócio peça.
+
+## Rastreabilidade: restrições invioláveis e falhas eliminatórias
+
+Cada item do enunciado (`docs/CHALLENGE.md`) ⇒ onde é garantido ⇒ qual teste o prova. Caminhos relativos à raiz; `test/support/invariants.ts` (`assertWalletInvariants`, `assertAllWalletsConsistent`) fecha os testes de integração e concorrência conferindo `wallet.balance == saldo do ledger`. Os testes de integração e concorrência usam PostgreSQL e LocalStack reais; o que se injeta são falhas **em volta** de componentes reais (ADR 27).
+
+### Restrições invioláveis (§5)
+
+| # | Restrição | Onde é garantida | Teste que prova |
+|---|---|---|---|
+| 1 | Sem `number`/`float` para dinheiro | `src/shared/domain/money.ts` (`decimal.js`, escala 2, formato estrito, `fromContract` recusa `number` e negativos); colunas `numeric(19,2)` mapeadas como `string` nos `*.entity-schema.ts`; SQL cru com parâmetros em string; soma da reconciliação em `numeric` no banco | `test/unit/shared/domain/money.test.ts` (`0.10 + 0.20 = 0.30`, formatos inválidos, não-string); `test/unit/shared/presentation/validation.test.ts`; `test/integration/persistence/persistence-integration.test.ts` (ida e volta exata de `0.10`, `1000000.00`, 17 dígitos); `submit-wager-transaction.use-case.test.ts` (aritmética exata em muitos movimentos) |
+| 2 | Cache em memória não é garantia de idempotência | `UNIQUE (idempotency_key)` e `UNIQUE (provider_id, external_transaction_id)` em `migrations/…01_CreateWalletsAndWagerTransactions.ts`; `insertIfAbsent` (`ON CONFLICT DO NOTHING`) em `src/wagering/infrastructure/persistence/wager-transaction.repository.ts`, usado por `submit-wager-transaction.use-case.ts`; não existe cache na decisão | `test/concurrency/same-bet-in-parallel.test.ts` (50× paralelo, 1 débito); `test/integration/db/wallets-and-wager-transactions.test.ts` (duplicatas rejeitadas pelo schema); `test/concurrency/service-restart.test.ts` (replay após reiniciar o processo) |
+| 3 | Não confiar só no SQS FIFO | inbox `PRIMARY KEY (consumer_name, message_id)` (`…03_CreateInboxAndOutboxMessages.ts`) + idempotência da transação; `ack` só depois do commit em `wager-transaction-message.handler.ts` | `test/integration/messaging/wager-transactions-consumer.test.ts` (mesmo `messageId` com `MessageDeduplicationId` distintos ⇒ um efeito); `test/concurrency/crash-between-commit-and-ack.test.ts` |
+| 4 | Não publicar antes do commit | eventos gravados na outbox dentro da transação (`wager-settlement.service.ts`, `UnitOfWork.run`); `OutboxBatchPublisher` só enxerga linhas confirmadas (`claimDue`, `SKIP LOCKED`) | `test/integration/messaging/outbox-concurrent-publishers.test.ts` (“does not see an event before the transaction that created it commits”); `test/integration/wagering/atomicity-under-injected-failure.test.ts`; `submit-wager-transaction.use-case.test.ts` (rollback após o `enqueue`) |
+| 5 | Ledger nunca sobrescrito nem excluído | triggers `BEFORE UPDATE OR DELETE` e `BEFORE TRUNCATE` em `…02_CreateWalletLedgerEntries.ts`; `LedgerRepository` expõe só `append` (`src/wallet/infrastructure/persistence/ledger.repository.ts`); `WalletLedgerEntry` sem setters | `test/integration/db/wallet-ledger-entries.test.ts` (UPDATE, DELETE e TRUNCATE recusados); `test/unit/wallet/domain/wallet-ledger-entry.test.ts` |
+| 6 | Sem lock global | lock de **linha** por wallet em `wallet.repository.ts` (`findByIdForUpdate`); nenhum `advisory lock`, mutex ou lock de tabela | `test/concurrency/competing-bets.test.ts` (20 wallets × 10 apostas sem erro de lock); `test/concurrency/multi-instance-same-wallet.test.ts` |
+| 7 | Sem `read → calculate → update` desprotegido | `findByIdForUpdate` + `updateBalance(wallet, expectedVersion)` (`UPDATE … WHERE version = ?`) + `CHECK (balance >= 0)`; toda escrita de saldo passa por esse par | `competing-bets.test.ts` (150 apostas de `1.00` sobre `100.00` ⇒ exatamente 100 aprovadas, saldo `0.00`); `submit-wager-transaction.use-case.test.ts` (“lets exactly one of two simultaneous BETs of 80.00 succeed”); `persistence-integration.test.ts` (conflito de versão e lock timeout); `wallet-lock-fk-deadlock.test.ts` |
+| 8 | Correto com múltiplas instâncias | nenhum estado em memória é fonte de verdade; claim por `SKIP LOCKED`; coordenação só pelo PostgreSQL | `test/concurrency/multi-instance-same-wallet.test.ts` (3 processos reais, HTTP + SQS); `outbox-publisher-processes.test.ts`; `crash-between-commit-and-ack.test.ts`; `service-restart.test.ts`; `test/integration/app/multi-instance-boot.test.ts` |
+| 9 | Unicidade, imutabilidade e não-negatividade **no schema** | `UNIQUE`, `CHECK`, índice único parcial de reversão e *triggers* nas três migrations (tabela “Garantia ⇒ mecanismo no schema” acima) | `test/integration/db/wallets-and-wager-transactions.test.ts`, `wallet-ledger-entries.test.ts`, `inbox-and-outbox-messages.test.ts` (violações direto por SQL, sem passar pela aplicação); `migrations-reversibility.test.ts` |
+
+### Falhas eliminatórias (§14)
+
+| Falha eliminatória | Onde é impedida | Teste que prova |
+|---|---|---|
+| `number` para dinheiro | ver restrição 1 | ver restrição 1 |
+| Saldo negativo por race | lock da wallet + `version` + `CHECK (balance >= 0)` (restrição 7) | `competing-bets.test.ts` (hot wallet), `multi-instance-same-wallet.test.ts` (33 aprovadas / 27 rejeitadas, saldo `1.00`), `pending-reference.test.ts` |
+| Débito ou crédito duplicado | idempotência no schema (restrição 2); `UNIQUE (transaction_id, wallet_id)` e `UNIQUE (wallet_id, wallet_version)` no ledger; índice único parcial de reversão; inbox | `same-bet-in-parallel.test.ts`; `crash-between-commit-and-ack.test.ts` (um débito por wallet após a reentrega); `pending-reference.test.ts` (`REFUND` e `ROLLBACK` da mesma `BET` ⇒ uma aplicada); `wallet-ledger-entries.test.ts` |
+| Idempotência apenas em memória | restrição 2 | `service-restart.test.ts` (após `SIGKILL` e novo processo, a mesma chave devolve 200 com `idempotentReplay`) |
+| Correto somente com uma instância | restrição 8 | `multi-instance-same-wallet.test.ts` (3 instâncias), `outbox-publisher-processes.test.ts` (2 publishers) |
+| Evento publicado antes do commit | restrição 4 | `outbox-concurrent-publishers.test.ts`; `atomicity-under-injected-failure.test.ts`; `outbox-publisher-processes.test.ts` (morte entre publicar e commitar: nada se perde, duplicata inofensiva) |
+| Ausência de ledger auditável | `wallet_ledger_entries` append-only com `wallet_version` e aritmética por `CHECK`; `OPENING` para o saldo inicial; reconciliação (`POST /wallets/:id/reconciliation`) | `assertWalletInvariants` em todo teste de concorrência; `test/integration/wallet/reconciliation.http.test.ts` (divergência forçada é acusada e não corrigida); `create-wallet.use-case.test.ts` |
+| Testes que trocam PostgreSQL e SQS por mocks | integração e concorrência sobem PostgreSQL e LocalStack reais (`test/support/database.ts`, `sqs.ts`, `process.ts`); mocks só no unitário de domínio | todo `test/integration/**` e `test/concurrency/**`; falhas injetadas ficam **em volta** de componentes reais (ADR 27) |
 
