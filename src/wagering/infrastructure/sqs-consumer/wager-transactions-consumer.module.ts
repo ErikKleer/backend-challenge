@@ -10,6 +10,7 @@ import { SqsMessagePoller } from "../../../messaging/infrastructure/sqs/sqs-mess
 import { SqsQueueUrlResolver } from "../../../messaging/infrastructure/sqs/sqs-queue-url.resolver";
 import { type EnvConfig, envSchema } from "../../../shared/infrastructure/config/env.config";
 import { AppLogger } from "../../../shared/infrastructure/observability/app-logger";
+import { MetricsService } from "../../../shared/infrastructure/observability/metrics.service";
 import { SubmitWagerTransactionUseCase } from "../../application/submit-wager-transaction.use-case";
 import { WageringModule } from "../../wagering.module";
 import { WagerTransactionMessageHandler } from "./wager-transaction-message.handler";
@@ -69,8 +70,21 @@ export class WagerTransactionsConsumerModule {
             useCase: SubmitWagerTransactionUseCase,
             acknowledger: MessageAcknowledger,
             logger: AppLogger,
-          ) => new WagerTransactionMessageHandler(useCase, acknowledger, logger),
-          inject: [SubmitWagerTransactionUseCase, MESSAGE_ACKNOWLEDGER_TOKEN, AppLogger],
+            metrics: MetricsService,
+            config: EnvConfig,
+          ) =>
+            new WagerTransactionMessageHandler(useCase, acknowledger, logger, metrics, {
+              retryBaseSeconds: config.SQS_RETRY_BASE_SECONDS,
+              retryMaxSeconds: config.SQS_RETRY_MAX_SECONDS,
+              maxReceiveCount: config.SQS_MAX_RECEIVE_COUNT,
+            }),
+          inject: [
+            SubmitWagerTransactionUseCase,
+            MESSAGE_ACKNOWLEDGER_TOKEN,
+            AppLogger,
+            MetricsService,
+            CONSUMER_CONFIG_TOKEN,
+          ],
         },
         {
           provide: POLLER_TOKEN,

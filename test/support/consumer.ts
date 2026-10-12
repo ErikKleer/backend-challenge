@@ -6,11 +6,14 @@ import type { SubmitWagerTransactionCommand } from "../../src/wagering/applicati
 import type { SubmitWagerTransactionUseCase } from "../../src/wagering/application/submit-wager-transaction.use-case";
 import { WagerTransactionMessageHandler } from "../../src/wagering/infrastructure/sqs-consumer/wager-transaction-message.handler";
 import { AppLogger } from "../../src/shared/infrastructure/observability/app-logger";
+import type { MetricsService } from "../../src/shared/infrastructure/observability/metrics.service";
 import type { PersistenceTestContext } from "./persistence";
 import { sendMessage, type TestQueues } from "./sqs";
-import { WageringHarness, type WalletFixture } from "./wagering";
+import { WageringHarness, type WageringHarnessOverrides, type WalletFixture } from "./wagering";
 
 export interface ConsumerRigOptions {
+  /** Wrappers com falha injetada em volta do ledger/outbox reais usados pelo use case. */
+  overrides?: WageringHarnessOverrides;
   /** Falha injetada em volta do use case real (por exemplo, erro transitório nas N primeiras). */
   useCase?: (real: SubmitWagerTransactionUseCase) => Pick<SubmitWagerTransactionUseCase, "execute">;
   /** Falha injetada em volta do acknowledger SQS real. */
@@ -24,6 +27,7 @@ export interface ConsumerRig {
   acknowledger: MessageAcknowledger;
   poller: SqsMessagePoller;
   handler: WagerTransactionMessageHandler;
+  metrics: MetricsService;
 }
 
 /**
@@ -35,21 +39,26 @@ export function buildConsumerRig(
   queues: TestQueues,
   options: ConsumerRigOptions = {},
 ): ConsumerRig {
-  const harness = new WageringHarness(ctx);
+  const harness = new WageringHarness(ctx, options.overrides);
   const logger = new AppLogger({ level: "silent" });
   const queueUrl = new SqsQueueUrlResolver(queues.client, queues.transactionsQueueName);
   const realAcknowledger = new SqsMessageAcknowledger(queues.client, queueUrl);
   const acknowledger = options.acknowledger?.(realAcknowledger) ?? realAcknowledger;
   const useCase = options.useCase?.(harness.useCase) ?? harness.useCase;
 
-  const handler = new WagerTransactionMessageHandler(useCase, acknowledger, logger);
+  const handler = new WagerTransactionMessageHandler(useCase, acknowledger, logger, harness.metrics, {
+    // Backoff mínimo (inteiro de segundos exigido pelo SQS) para os testes terminarem rápido
+    retryBaseSeconds: 1,
+    retryMaxSeconds: 1,
+    maxReceiveCount: queues.maxReceiveCount,
+  });
   const poller = new SqsMessagePoller(queues.client, queueUrl, handler, acknowledger, logger, {
     waitSeconds: 1,
     maxMessages: 10,
     concurrency: options.concurrency ?? 4,
     shutdownTimeoutMs: options.shutdownTimeoutMs ?? 5000,
   });
-  return { harness, acknowledger, poller, handler };
+  return { harness, acknowledger, poller, handler, metrics: harness.metrics };
 }
 
 /** Corpo da mensagem `WagerTransactionRequested` (README §10) para um comando. */
@@ -90,4 +99,21 @@ export async function sendWagerMessage(
     groupId: wallet.walletId,
     ...(options.deduplicationId !== undefined ? { deduplicationId: options.deduplicationId } : {}),
   });
+}
+
+/** Valor de um contador do `MetricsService` para um conjunto exato de rótulos (0 se nunca incrementado). */
+export async function counterValue(
+  metrics: MetricsService,
+  name: string,
+  labels: Record<string, string> = {},
+): Promise<number> {
+  const metric = metrics.registry.getSingleMetric(name);
+  if (!metric) {
+    throw new Error(`Unknown metric '${name}'`);
+  }
+  const { values } = await metric.get();
+  const match = values.find((entry) =>
+    Object.entries(labels).every(([key, value]) => entry.labels[key] === value),
+  );
+  return match?.value ?? 0;
 }

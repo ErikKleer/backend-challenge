@@ -16,6 +16,8 @@ const TEST_REGION = process.env.AWS_REGION ?? "us-east-1";
 
 export interface TestQueues {
   client: SQSClient;
+  /** `maxReceiveCount` da redrive policy desta fila de transações. */
+  maxReceiveCount: number;
   /** Nome da fila de eventos (com prefixo único), como o publisher a resolve. */
   eventsQueueName: string;
   eventsUrl: string;
@@ -38,6 +40,8 @@ export interface ReceivedMessage {
  * Provisiona um trio de filas com prefixo aleatório no LocalStack real: cada suíte tem as
  * suas, então o conteúdo de uma nunca aparece em outra e não há limpeza entre suítes.
  */
+const DEFAULT_MAX_RECEIVE_COUNT = 5;
+
 export interface TestQueuesOptions {
   /** Default 5s: uma mensagem recebida e não apagada reaparece rápido. */
   visibilityTimeoutSeconds?: number;
@@ -64,6 +68,7 @@ export async function createTestQueues(options: TestQueuesOptions = {}): Promise
 
   return {
     client,
+    maxReceiveCount: options.maxReceiveCount ?? DEFAULT_MAX_RECEIVE_COUNT,
     eventsQueueName: `${prefix}wager-events.fifo`,
     eventsUrl: provisioned.eventsUrl,
     transactionsQueueName: `${prefix}wager-transactions.fifo`,

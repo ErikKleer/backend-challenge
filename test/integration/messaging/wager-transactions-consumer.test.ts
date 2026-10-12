@@ -4,9 +4,12 @@ import { createTestDatabase, type TestDatabaseContext } from "../../support/data
 import { assertLedgerMatchesBalance } from "../../support/invariants";
 import { waitFor } from "../../support/parallel";
 import { createPersistenceTestContext, type PersistenceTestContext } from "../../support/persistence";
-import { buildConsumerRig, sendWagerMessage, type ConsumerRig } from "../../support/consumer";
+import { buildConsumerRig, counterValue, sendWagerMessage, type ConsumerRig } from "../../support/consumer";
 import { createTestQueues, isQueueEmpty, type TestQueues } from "../../support/sqs";
 import { brl } from "../../support/wagering";
+import type { LedgerRepository } from "../../../src/wallet/application/ledger.repository.port";
+import type { WalletLedgerEntry } from "../../../src/wallet/domain/wallet-ledger-entry";
+import { LockTimeoutError } from "../../../src/shared/infrastructure/persistence/postgres-errors";
 
 let db: TestDatabaseContext;
 let ctx: PersistenceTestContext;
@@ -72,6 +75,14 @@ async function outboxEventTypes(walletId: string): Promise<string[]> {
   return rows.map((row) => row.eventType);
 }
 
+async function transactionsOf(walletId: string): Promise<Array<{ status: string; failureCode: string | null }>> {
+  return db.orm.em.fork().execute(
+    `SELECT status, failure_code AS "failureCode" FROM wager_transactions
+      WHERE wallet_id = ? AND kind <> 'OPENING'`,
+    [walletId],
+  );
+}
+
 const queueDrained = () =>
   waitFor(() => isQueueEmpty(queues.client, queues.transactionsUrl), {
     timeoutMs: 20_000,
@@ -134,5 +145,78 @@ describe("wager transactions consumer", () => {
       { messageId: ids[1]!, processed: true },
     ]);
     await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+  });
+
+  describe("business outcomes", () => {
+    it("persists a rejection, acknowledges the message and leaves the DLQ empty", async () => {
+      const wallet = await rig.harness.createWallet("100.00");
+      const command = rig.harness.command(wallet, { money: brl("500.00") });
+
+      await sendWagerMessage(queues, wallet, command, messageIds("msg-reject").ids[0]!);
+      rig.poller.start();
+      await queueDrained();
+      await rig.poller.stop();
+
+      expect(await transactionsOf(wallet.walletId)).toEqual([
+        { status: "REJECTED", failureCode: "INSUFFICIENT_FUNDS" },
+      ]);
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "100.00", version: 1 });
+      expect(await isQueueEmpty(queues.client, queues.dlqUrl)).toBe(true);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+    });
+
+    it("acknowledges an idempotency conflict without touching the first result", async () => {
+      const wallet = await rig.harness.createWallet("100.00");
+      const first = rig.harness.command(wallet, { money: brl("30.00") });
+      const conflicting = { ...first, money: brl("40.00") };
+      const { suffix, ids } = messageIds("msg-first", "msg-conflict");
+
+      await sendWagerMessage(queues, wallet, first, ids[0]!);
+      await sendWagerMessage(queues, wallet, conflicting, ids[1]!);
+      rig.poller.start();
+      await queueDrained();
+      await rig.poller.stop();
+
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
+      expect(await transactionCount(wallet.walletId)).toBe(1);
+      // A transação do conflito desfez a inbox junto: só a primeira mensagem ficou registrada
+      expect(await inboxRows(suffix)).toEqual([{ messageId: ids[0]!, processed: true }]);
+      expect(await isQueueEmpty(queues.client, queues.dlqUrl)).toBe(true);
+      expect(await counterValue(rig.metrics, "wager_duplicates_total", { type: "conflict" })).toBe(1);
+    });
+  });
+
+  describe("transient failures", () => {
+    it("redelivers after the backoff and finishes processed, with a single effect", async () => {
+      let failuresLeft = 2;
+      const failingLedger = (real: LedgerRepository): LedgerRepository => ({
+        findPage: (...args) => real.findPage(...args),
+        append: async (entry: WalletLedgerEntry) => {
+          await real.append(entry);
+          if (failuresLeft > 0) {
+            failuresLeft -= 1;
+            // Depois do lançamento real: o rollback precisa desfazer saldo, ledger e inbox juntos
+            throw new LockTimeoutError();
+          }
+        },
+      });
+      rig = buildConsumerRig(ctx, queues, { overrides: { ledger: failingLedger(ctx.ledgerRepo) } });
+      const wallet = await rig.harness.createWallet("100.00");
+      const command = rig.harness.command(wallet, { money: brl("30.00") });
+      const { suffix, ids } = messageIds("msg-flaky");
+
+      await sendWagerMessage(queues, wallet, command, ids[0]!);
+      rig.poller.start();
+      await queueDrained();
+      await rig.poller.stop();
+
+      expect(failuresLeft).toBe(0);
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
+      expect(await transactionCount(wallet.walletId)).toBe(1);
+      expect(await inboxRows(suffix)).toEqual([{ messageId: ids[0]!, processed: true }]);
+      expect(await counterValue(rig.metrics, "wager_retries_total", { reason: "transient_failure" })).toBe(2);
+      expect(await counterValue(rig.metrics, "wager_retries_total", { reason: "redelivery" })).toBe(2);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+    });
   });
 });

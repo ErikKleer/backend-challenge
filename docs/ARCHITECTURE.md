@@ -367,6 +367,16 @@ sequenceDiagram
   4. **Mesmo caso de uso do HTTP:** `execute(command, { inbox: { consumerName: "wager-transactions-consumer", messageId, payloadHash } })`. Inbox, saldo, ledger, transação e outbox ficam na **mesma transação SQL**; o handler só chama `DeleteMessage` depois que `execute` retornou (commit feito). O `DeleteMessage` passa pela porta `MessageAcknowledger`, que os testes envolvem com falha injetada.
   5. **Semântica da inbox:** `INSERT … ON CONFLICT DO NOTHING` em `(consumer_name, message_id)`. Se a linha já existia, o efeito já foi (ou está sendo) gravado: o caso de uso devolve o resultado original como *replay*, sem reprocessar. A inbox desfaz junto com a transação: falha de processamento não deixa uma mensagem "recebida" sem efeito.
   6. **`payloadHash` da inbox** = SHA-256 do JSON canônico de `{ idempotencyKey, hash de negócio }`; `messageId` e `occurredAt` ficam de fora. Dois casos distintos: (a) **mesmo `messageId`, mesmo hash** = redelivery (replay); (b) **mesmo `messageId`, hash diferente** = `InboxPayloadMismatchError` (erro permanente). Um `messageId` **diferente** com a mesma `idempotencyKey` e o mesmo payload é replay pela idempotência da transação, e sua linha de inbox também é marcada como processada.
+  7. **Classificação de erros** (`classifyConsumerError`): toda mensagem termina em uma de três ações.
+
+     | Categoria | Ação | Exemplos |
+     |---|---|---|
+     | Negócio / terminal | `DeleteMessage` (ack) | resultado `PROCESSED`, `REJECTED` (ex.: `INSUFFICIENT_FUNDS`) ou `PENDING_REFERENCE`; replay; `messageId` já na inbox com o mesmo hash; `IdempotencyConflictError` |
+     | Transitório | sem ack; `ChangeMessageVisibility` com backoff | `LockTimeoutError`, deadlock, `WalletVersionConflictError`, banco indisponível, erro desconhecido |
+     | Permanente | DLQ (ADR 24, item 9) | JSON ou schema inválido, `type` desconhecido, `kind = OPENING`, wallet inexistente, `messageId` repetido com `payloadHash` diferente, erro estrutural do banco |
+
+     Um erro **desconhecido** conta como transitório: repetir é seguro (inbox e idempotência barram efeito duplicado) e o limite de entregas o leva à DLQ se o defeito persistir.
+  8. **Retry e limite de tentativas:** sem ack, a mensagem volta sozinha; o consumidor só escolhe a espera: `min(SQS_RETRY_MAX_SECONDS, SQS_RETRY_BASE_SECONDS × 2^(ApproximateReceiveCount − 1))` (default 2s → 60s). O teto de entregas é o `maxReceiveCount` da redrive policy (`SQS_MAX_RECEIVE_COUNT`, default 5, usado também pelo script de provisionamento): ao esgotá-lo o broker move a mensagem para a DLQ. Na última entrega o consumidor registra `sqs_dlq_messages_total{reason="max_receive_count"}` e um log de erro, pois é o único momento em que sabe que o broker vai movê-la. `wager_retries_total{source="sqs"}` conta `transient_failure` (retry agendado) e `redelivery` (entrega com `ApproximateReceiveCount > 1`).
 - **Consequências:** Um worker que morre depois do commit e antes do ack é inofensivo: a mensagem reaparece e a inbox a descarta. A deduplicação não depende de memória nem da janela de 5 min do FIFO.
 
 ### Modelo de Dados (Diagrama ER)
