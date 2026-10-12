@@ -6,6 +6,7 @@ import { CreateWalletUseCase } from "../../src/wallet/application/create-wallet.
 import type { OutboxRepository } from "../../src/messaging/application/outbox.repository.port";
 import type { LedgerRepository } from "../../src/wallet/application/ledger.repository.port";
 import type { Clock } from "../../src/shared/application/clock.port";
+import type { FaultInjector } from "../../src/shared/application/fault-injector.port";
 import type { PendingReferencePolicy } from "../../src/wagering/application/pending-reference-policy";
 import { PendingReferenceReprocessor } from "../../src/wagering/application/pending-reference.reprocessor";
 import type { SubmitWagerTransactionCommand } from "../../src/wagering/application/submit-wager-transaction.command";
@@ -43,6 +44,8 @@ export interface WageringHarnessOverrides {
   /** Wrapper com falha injetada em volta do repositório real. */
   ledger?: LedgerRepository;
   outbox?: OutboxRepository;
+  /** Injetor de falhas da liquidação; os de teste lançam em vez de matar o processo. */
+  faults?: FaultInjector;
 }
 
 /**
@@ -67,6 +70,7 @@ export class WageringHarness {
       overrides.outbox ?? ctx.outboxRepo,
       ctx.idGenerator,
       overrides.pendingPolicy ?? TEST_PENDING_POLICY,
+      overrides.faults,
     );
     const clock = overrides.clock ?? ctx.clock;
     this.useCase = new SubmitWagerTransactionUseCase(
