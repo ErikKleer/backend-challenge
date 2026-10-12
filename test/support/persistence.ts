@@ -7,6 +7,8 @@ import { UNIT_OF_WORK_TOKEN, type UnitOfWork } from "../../src/shared/applicatio
 import { WALLET_REPOSITORY_TOKEN, type WalletRepository } from "../../src/wallet/application/wallet.repository.port";
 import { LEDGER_REPOSITORY_TOKEN, type LedgerRepository } from "../../src/wallet/application/ledger.repository.port";
 import { WAGER_TRANSACTION_REPOSITORY_TOKEN, type WagerTransactionRepository } from "../../src/wagering/application/wager-transaction.repository.port";
+import { OUTBOX_REPOSITORY_TOKEN, type OutboxRepository } from "../../src/messaging/application/outbox.repository.port";
+import { INBOX_REPOSITORY_TOKEN, type InboxRepository } from "../../src/messaging/application/inbox.repository.port";
 import type { TestDatabaseContext } from "./database";
 
 export interface PersistenceTestContext {
@@ -17,6 +19,8 @@ export interface PersistenceTestContext {
   walletRepo: WalletRepository;
   ledgerRepo: LedgerRepository;
   transactionRepo: WagerTransactionRepository;
+  outboxRepo: OutboxRepository;
+  inboxRepo: InboxRepository;
 }
 
 /**
@@ -41,6 +45,8 @@ export async function createPersistenceTestContext(
     walletRepo: app.get<WalletRepository>(WALLET_REPOSITORY_TOKEN),
     ledgerRepo: app.get<LedgerRepository>(LEDGER_REPOSITORY_TOKEN),
     transactionRepo: app.get<WagerTransactionRepository>(WAGER_TRANSACTION_REPOSITORY_TOKEN),
+    outboxRepo: app.get<OutboxRepository>(OUTBOX_REPOSITORY_TOKEN),
+    inboxRepo: app.get<InboxRepository>(INBOX_REPOSITORY_TOKEN),
   };
 }
 

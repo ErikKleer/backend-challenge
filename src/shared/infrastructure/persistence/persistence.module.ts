@@ -12,6 +12,10 @@ import { LEDGER_REPOSITORY_TOKEN } from "../../../wallet/application/ledger.repo
 import { MikroOrmLedgerRepository } from "../../../wallet/infrastructure/persistence/ledger.repository";
 import { WAGER_TRANSACTION_REPOSITORY_TOKEN } from "../../../wagering/application/wager-transaction.repository.port";
 import { MikroOrmWagerTransactionRepository } from "../../../wagering/infrastructure/persistence/wager-transaction.repository";
+import { OUTBOX_REPOSITORY_TOKEN } from "../../../messaging/application/outbox.repository.port";
+import { MikroOrmOutboxRepository } from "../../../messaging/infrastructure/persistence/outbox.repository";
+import { INBOX_REPOSITORY_TOKEN } from "../../../messaging/application/inbox.repository.port";
+import { MikroOrmInboxRepository } from "../../../messaging/infrastructure/persistence/inbox.repository";
 
 @Module({})
 export class PersistenceModule {
@@ -66,6 +70,14 @@ export class PersistenceModule {
         },
         inject: [EntityManager],
       },
+      {
+        provide: OUTBOX_REPOSITORY_TOKEN,
+        useFactory: () => new MikroOrmOutboxRepository(),
+      },
+      {
+        provide: INBOX_REPOSITORY_TOKEN,
+        useFactory: () => new MikroOrmInboxRepository(),
+      },
     ];
 
     return {
@@ -79,6 +91,8 @@ export class PersistenceModule {
         WALLET_REPOSITORY_TOKEN,
         LEDGER_REPOSITORY_TOKEN,
         WAGER_TRANSACTION_REPOSITORY_TOKEN,
+        OUTBOX_REPOSITORY_TOKEN,
+        INBOX_REPOSITORY_TOKEN,
       ],
     };
   }

@@ -159,6 +159,17 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
   2. **`InboxMessage`:** identidade `(consumerName, messageId)` com `payloadHash` (SHA-256 hex) para detectar o mesmo `messageId` reentregue com conteúdo diferente. `markProcessed` só uma vez.
 - **Consequências:** O reagendamento é puro e testável sem relógio real. Detalhes dos repositórios (claim com `SKIP LOCKED`) ficam no ADR 11.
 
+### ADR 11: Repositórios de Inbox e Outbox, Claim com `SKIP LOCKED` e Limite de Ordenação
+
+- **Contexto:** Vários publishers (e várias instâncias) leem a mesma outbox; o consumo SQS é *at-least-once*. Inbox e outbox precisam participar da transação financeira.
+- **Decisão:**
+  1. **Transação obrigatória:** `OutboxRepository` e `InboxRepository` usam sempre o `EntityManager` da transação corrente e falham se não houver `UnitOfWork.run`. Diferente dos demais repositórios, não há fallback para o EntityManager raiz: em autocommit, o lock do claim seria solto na hora e o `enqueue` ficaria fora da transação financeira.
+  2. **Outbox:** `enqueue` usa `INSERT … ON CONFLICT (id) DO NOTHING` (o `id` é o `eventId` determinístico). `claimDue(now, limit)` seleciona `published_at IS NULL AND COALESCE(next_attempt_at, occurred_at) <= now`, ordena por `COALESCE(next_attempt_at, occurred_at), id` e usa `FOR UPDATE SKIP LOCKED`, casando com o índice parcial `idx_outbox_messages_claim`. Dois publishers simultâneos recebem conjuntos disjuntos, sem esperar um pelo outro. O lock vale até o fim da transação: se o publisher morrer antes do commit, as linhas voltam a ficar disponíveis para outra instância.
+  3. **Inbox:** `tryReceive` usa `ON CONFLICT (consumer_name, message_id) DO NOTHING` e devolve `false` na redelivery. Se o processamento falhar e a transação der rollback, o registro da inbox some junto e a mensagem reentregue é processada de novo.
+  4. **Timestamps:** `em.execute` (SQL cru) devolve `timestamptz` como string; os mappers de messaging normalizam com `toDate`/`toOptionalDate`.
+  5. **Limitação de ordenação:** a ordem de publicação só é garantida por wallet quando há um único publisher ativo por vez. Com vários publishers, o evento de `walletVersion` N+1 pode ser publicado antes do N (cada publisher reclama um subconjunto e a publicação em si é concorrente). O FIFO ordena apenas o que chega ao broker. **O consumidor ordena e descarta duplicatas por `walletVersion`** (`WalletBalanceChanged`), não pela ordem de chegada. Não se usa lock global para forçar ordem (README §5.6).
+- **Consequências:** Publicação concorrente sem perda e sem duplicação indefinida (a duplicata eventual é absorvida pelo `eventId`). O custo é a ordenação best-effort no broker, compensada pelo versionamento no consumidor.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid
