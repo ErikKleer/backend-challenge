@@ -193,6 +193,15 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
 
 - **Consequências:** Cada prompt seguinte instrumenta o que implementa sem tocar na infraestrutura. O custo é que adicionar uma métrica exige editar `MetricsService`, o que mantém o catálogo e os rótulos num lugar só. Ficam fora de escopo health checks (prompt 14) e OpenTelemetry. Limitação: o contexto é por processo; a correlação entre serviços depende de o chamador enviar `X-Correlation-Id`.
 
+### ADR 13: Autenticação não implementada, com ponto de extensão explícito
+
+- **Contexto:** README §2 não atribui pontos à autenticação e aceita não implementá-la, desde que a decisão seja documentada, o desenho alternativo seja descrito e o ponto de extensão fique explícito no código. Health checks e `/metrics` ficam abertos; mensagens da fila são canal interno confiável.
+- **Decisão:**
+  1. **Nada de autenticação artesanal.** `AuthGuard` global (`APP_GUARD`) é **no-op**: sempre permite. Ele já lê a marca `@Public()` (`Reflector`), de modo que trocar o corpo pelo guard real não exige tocar nas rotas. `/metrics` está marcada `@Public()`; os health checks seguirão a mesma regra.
+  2. **`ProviderIdentityPort`** (`resolve(request): Promise<ProviderIdentity | undefined>`, token `PROVIDER_IDENTITY_TOKEN`) isola a origem da identidade do provedor. A implementação atual, `NoopProviderIdentity`, nunca resolve identidade.
+  3. **Desenho adotado quando houver autenticação:** integrar um IdP externo via OIDC (Keycloak ou Zitadel no Docker Compose), sem tabela própria de usuários. O guard real valida o token (assinatura por JWKS, expiração, audiência) através da porta e **exige que o `providerId` do token seja igual ao `providerId` do corpo**, para que um provedor não submeta transações em nome de outro; falha de token ⇒ 401, divergência ⇒ 403. O canal SQS continua confiável, mas a identidade do provedor na mensagem segue sujeita às validações de domínio.
+- **Consequências:** O custo de ligar a autenticação é implementar uma classe (guard) e uma implementação da porta. Enquanto isso, qualquer cliente que alcance a API pode submeter transações em nome de qualquer provedor; a API não deve ser exposta fora de rede confiável nesta configuração.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid
