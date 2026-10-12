@@ -340,6 +340,21 @@ sequenceDiagram
   5. **Falha de infraestrutura quebra o teste:** `runInParallel` rejeita na primeira exceção. Um 503/lock timeout inesperado é um achado, não algo a mascarar com retry.
 - **Consequências:** Os testes são determinísticos nos números (100/50, 5/5, 1 débito) porque a regra de negócio decide o resultado, não a ordem de chegada; só **quem** vence varia. A estabilidade foi verificada com 5 execuções consecutivas da suíte. Os itens 4–8 do README §13 (múltiplas instâncias, morte do worker, publishers, reinício) pertencem aos prompts de mensageria.
 
+### ADR 23: Outbox publisher — ciclo transacional, garantias e limites
+
+- **Contexto:** O evento já commitado na outbox precisa chegar ao `wager-events.fifo` com vários publishers (processos e instâncias) rodando ao mesmo tempo, sem perder evento e sem depender da ordem do broker (README §11).
+- **Decisão:**
+  1. **Porta e adaptador:** `EventPublisher.publish(OutboxMessage)` na camada de aplicação; `SqsEventPublisher` envia `JSON.stringify(payload)` (o payload da outbox já é o envelope) com `MessageGroupId = aggregateId` e `MessageDeduplicationId = eventId`. A URL da fila é resolvida por nome uma vez e cacheada (`SqsQueueUrlResolver`); falha de resolução não é cacheada e, no boot, só gera aviso.
+  2. **Cliente SQS:** `requestTimeout` vem de `SQS_REQUEST_TIMEOUT_MS` (3s) e `maxAttempts: 1`. O retry fica com a outbox (backoff persistido); um retry escondido no SDK só alongaria a transação do publisher.
+  3. **Ciclo (`OutboxBatchPublisher.runOnce`)**, em **uma** transação: `claimDue(now, OUTBOX_BATCH_SIZE)` (`FOR UPDATE SKIP LOCKED`) → `publish` de cada mensagem → `markPublished` ou `scheduleRetry` + `save` → commit. A falha de uma mensagem agenda o retry dela e não desfaz as que deram certo. Falha de banco (claim, save, commit) rejeita o ciclo e o rollback devolve todas as linhas.
+  4. **Trade-off assumido:** a transação e o lock ficam abertos durante as chamadas ao SQS. Mitigação: lote pequeno (10) e timeout curto. A alternativa (marcar "em publicação", commitar, enviar, marcar "publicada") exige lease e recuperação de órfãs; em troca, aqui um publisher que morre libera os locks sozinho e outra instância assume. Para o volume do desafio, o custo de segurar a transação é menor que o de um estado intermediário.
+  5. **Worker (`OutboxPublisherWorker`):** laço contínuo, um ciclo por vez no processo; espera `OUTBOX_POLL_INTERVAL_MS` quando o lote não veio cheio e roda de novo imediatamente quando veio. Papel ligado por `ENABLE_OUTBOX_PUBLISHER`. `onModuleDestroy` impede novos ciclos, acorda a espera e aguarda o lote em andamento (inclui o commit).
+  6. **Sem limite de tentativas:** evento confirmado não se perde; a falha persistente vira defasagem observável (`outbox_lag_seconds`).
+  7. **Flags booleanas de ambiente:** `z.coerce.boolean()` interpreta `"false"` como `true`; as flags `ENABLE_*` passaram a um parser próprio (`false`, `0`, `no`, `off` e vazio desligam).
+- **Garantias:** (a) *at-least-once*: se o processo morre entre o `SendMessage` e o commit, a linha segue pendente e outro publisher a envia de novo; (b) nenhum evento sai antes do commit financeiro, pois o claim só enxerga linhas commitadas; (c) a dedup do FIFO (janela de 5 min por `MessageDeduplicationId`) reduz duplicatas, mas **não** é a garantia: o consumidor deduplica por `eventId`.
+- **Limitações:** a ordem por agregado **não** é garantida com vários publishers (cada um publica um subconjunto, e um evento que falha e é reagendado chega depois dos seguintes); o consumidor ordena e descarta duplicatas por `walletVersion`. Duplicatas são possíveis e esperadas após crash ou timeout ambíguo (o `SendMessage` pode ter chegado ao broker mesmo com a resposta perdida).
+- **Consequências:** Vários publishers e várias instâncias são seguros sem lock global. O custo é a ordenação best-effort no broker e a transação mais longa durante a rede.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

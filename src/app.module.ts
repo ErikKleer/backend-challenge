@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { MikroOrmModule } from "@mikro-orm/nestjs";
 import config from "../mikro-orm.config";
 import { AuthModule } from "./auth/auth.module";
+import { MessagingModule } from "./messaging/messaging.module";
 import { ObservabilityModule } from "./shared/infrastructure/observability/observability.module";
 import { PersistenceModule } from "./shared/infrastructure/persistence/persistence.module";
 import { PresentationModule } from "./shared/presentation/presentation.module";
@@ -22,6 +23,7 @@ export class ApiModule {}
     MikroOrmModule.forRoot(config),
     PersistenceModule.forRoot(),
     ObservabilityModule.forRoot(),
+    MessagingModule.forRoot(),
     ApiModule,
   ],
 })
