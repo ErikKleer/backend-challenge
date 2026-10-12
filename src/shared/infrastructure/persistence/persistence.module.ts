@@ -1,4 +1,5 @@
 import { type DynamicModule, Module } from "@nestjs/common";
+import { EntityManager as CoreEntityManager } from "@mikro-orm/core";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { CLOCK_TOKEN } from "../../application/clock.port";
 import { SystemClock } from "../clock/system-clock";
@@ -26,8 +27,11 @@ export class PersistenceModule {
           useValue: customEntityManager,
         }
       : {
+          // O MikroOrmModule registra o EntityManager do pacote core; o do driver
+          // (SqlEntityManager) não é resolvido de forma confiável sob Bun.
           provide: EntityManager,
-          useExisting: EntityManager,
+          useFactory: (em: CoreEntityManager) => em as EntityManager,
+          inject: [CoreEntityManager],
         };
 
     const providers = [
