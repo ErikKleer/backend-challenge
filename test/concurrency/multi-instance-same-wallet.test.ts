@@ -4,13 +4,7 @@ import { sendWagerMessage } from "../support/consumer";
 import { assertAllWalletsConsistent, assertNoStuckTransactions } from "../support/invariants";
 import { runInParallel, waitFor } from "../support/parallel";
 import { createPersistenceTestContext, type PersistenceTestContext } from "../support/persistence";
-import {
-  type AppInstance,
-  type HttpOutcome,
-  postWagerTransaction,
-  startInstances,
-  stopAll,
-} from "../support/process";
+import { type AppInstance, postUntilSettled, startInstances, stopAll } from "../support/process";
 import { createTestQueues, eventIdsOf, isQueueEmpty, receiveUntil, type TestQueues } from "../support/sqs";
 import { brl, WageringHarness } from "../support/wagering";
 
@@ -21,7 +15,6 @@ const BET_AMOUNT = "3.00";
 const HTTP_BETS = 40;
 const SQS_BETS = 20;
 const EXPECTED_PROCESSED = 33;
-const MAX_TRANSIENT_RETRIES = 40;
 
 describe("three application instances competing for the same wallet", () => {
   let db: TestDatabaseContext;
@@ -49,24 +42,6 @@ describe("three application instances competing for the same wallet", () => {
     await db.teardown();
   });
 
-  /** 503 é o contrato para falha transitória (lock timeout): o cliente repete com a mesma chave. */
-  async function submitUntilSettled(
-    instance: AppInstance,
-    command: ReturnType<WageringHarness["command"]>,
-  ): Promise<{ outcome: HttpOutcome; transientRetries: number }> {
-    let transientRetries = 0;
-    for (;;) {
-      const outcome = await postWagerTransaction(instance.baseUrl, command);
-      if (outcome.status !== 503) {
-        return { outcome, transientRetries };
-      }
-      transientRetries += 1;
-      if (transientRetries > MAX_TRANSIENT_RETRIES) {
-        throw new Error(`transaction ${command.externalTransactionId} kept failing transiently`);
-      }
-    }
-  }
-
   async function scalar(sql: string, params: unknown[] = []): Promise<string> {
     const [row] = await db.orm.em.execute<Array<{ value: string }>>(sql, params);
     return row!.value;
@@ -85,7 +60,7 @@ describe("three application instances competing for the same wallet", () => {
       // HTTP (espalhado entre as instâncias) e SQS (consumido por todas) disparam juntos
       const [httpResults] = await Promise.all([
         runInParallel(HTTP_BETS, (index) =>
-          submitUntilSettled(instances[index % INSTANCES]!, httpBets[index]!),
+          postUntilSettled(instances[index % INSTANCES]!.baseUrl, httpBets[index]!),
         ),
         (async () => {
           for (const [index, bet] of sqsBets.entries()) {

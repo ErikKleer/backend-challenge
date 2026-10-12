@@ -247,3 +247,25 @@ export async function postWagerTransaction(
   });
   return { status: response.status, body: (await response.json()) as HttpOutcome["body"] };
 }
+
+/**
+ * Repete a mesma requisição (mesma `Idempotency-Key`) enquanto a instância responde 503:
+ * é o contrato para falha transitória (lock timeout, deadlock). Devolve quantas vezes foi preciso.
+ */
+export async function postUntilSettled(
+  baseUrl: string,
+  command: SubmitWagerTransactionCommand,
+  maxTransientRetries = 40,
+): Promise<{ outcome: HttpOutcome; transientRetries: number }> {
+  let transientRetries = 0;
+  for (;;) {
+    const outcome = await postWagerTransaction(baseUrl, command);
+    if (outcome.status !== 503) {
+      return { outcome, transientRetries };
+    }
+    transientRetries += 1;
+    if (transientRetries > maxTransientRetries) {
+      throw new Error(`transaction ${command.externalTransactionId} kept failing transiently`);
+    }
+  }
+}
