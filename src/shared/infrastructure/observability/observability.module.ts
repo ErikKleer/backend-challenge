@@ -10,6 +10,8 @@ import { envSchema } from "../config/env.config";
 import { AppLogger, type AppLoggerOptions } from "./app-logger";
 import { createCorrelationIdMiddleware } from "./correlation-id.middleware";
 import { HttpAccessLogInterceptor } from "./http-access-log.interceptor";
+import { MetricsController } from "./metrics.controller";
+import { MetricsService } from "./metrics.service";
 
 @Module({})
 export class ObservabilityModule implements NestModule {
@@ -21,7 +23,9 @@ export class ObservabilityModule implements NestModule {
     return {
       module: ObservabilityModule,
       global: true,
+      controllers: [MetricsController],
       providers: [
+        { provide: MetricsService, useFactory: () => new MetricsService() },
         {
           provide: AppLogger,
           useFactory: () =>
@@ -36,7 +40,7 @@ export class ObservabilityModule implements NestModule {
           inject: [AppLogger],
         },
       ],
-      exports: [AppLogger],
+      exports: [AppLogger, MetricsService],
     };
   }
 

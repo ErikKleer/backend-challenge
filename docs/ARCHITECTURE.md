@@ -176,6 +176,22 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
 - **Decisão:**
   1. **Contexto de execução (`AsyncLocalStorage`):** `runWithContext(ctx, fn)` abre o contexto (copiando o objeto) e `bindContext(partial)` o enriquece com `messageId`, `transactionId`, `walletId`, `providerId`; valores `undefined` não apagam o que já foi vinculado. O contexto é compartilhado por toda a execução; ramos de um `Promise.all` que precisem de ids próprios abrem um `runWithContext` aninhado. O middleware HTTP reaproveita `X-Correlation-Id` quando casa `^[A-Za-z0-9._:-]{1,128}$` (evita injeção em log/cabeçalho), gera UUID v7 caso contrário e devolve o header na resposta.
   2. **Logs (`pino`, JSON):** `AppLogger` mescla o contexto corrente em cada linha via `mixin` e substitui o logger do Nest (`app.useLogger`, com `bufferLogs`). Campos fixos: `time` (ISO), `level` (texto), `msg`, `correlationId`, `messageId`, `transactionId`, `walletId`, `providerId` (os de contexto aparecem quando vinculados). **Política: não se logam valores monetários nem payloads completos; logam-se identificadores e resultados (`status`, `failureCode`).** Como rede de segurança, `redactSensitive` troca por `[Redacted]` as chaves `authorization`, `cookie`, `amount`, `money`, `payload` e qualquer chave que contenha `balance`, em qualquer profundidade e sem distinguir maiúsculas. Optou-se por essa função em vez do `redact` nativo do pino porque os caminhos do `fast-redact` não aceitam curingas no meio do nome (`*.balance*`) nem profundidade arbitrária. O log de acesso HTTP (interceptor) registra método, padrão da rota (`/wallets/:id`, não o path real), status e duração no evento `finish` da resposta, sem corpo, query string nem cabeçalhos; `/metrics` sai em `debug` para não poluir o log com o scrape.
+  3. **Métricas (`prom-client`):** `MetricsService` é o único ponto de instrumentação. Declara todos os instrumentos num `Registry` próprio (não o global), expõe métodos tipados (`recordTransaction`, `recordDuplicate`, `startProcessingTimer`…) e os módulos seguintes apenas os chamam. Rótulos têm valores fechados e baixa cardinalidade: nunca `walletId`, `transactionId` nem valores monetários. `GET /metrics` é aberto (README §2) e as métricas padrão do processo (`collectDefaultMetrics`) funcionam no Bun.
+
+     | Métrica | Tipo | Rótulos | Quem alimenta |
+     |---|---|---|---|
+     | `wager_transactions_total` | counter | `kind`, `status`, `failure_code` (`NONE` sem falha) | use cases de processamento |
+     | `wager_duplicates_total` | counter | `source` (`http`/`sqs`/`pending_worker`), `type` (`replay`/`conflict`) | idempotência |
+     | `wager_retries_total` | counter | `source`, `reason` (`transient_failure`/`pending_reference`/`redelivery`) | consumidor SQS, worker de referência |
+     | `sqs_dlq_messages_total` | counter | `reason` (`invalid_message`/`max_receive_count`/`permanent_failure`) | consumidor SQS |
+     | `wallet_lock_conflicts_total` | counter | `type` (`lock_timeout`/`version_conflict`/`deadlock`) | classificação de erros do banco |
+     | `outbox_lag_seconds` | gauge | — | publisher da outbox (idade do evento pendente mais antigo; 0 se vazia) |
+     | `outbox_published_total` | counter | — | publisher da outbox |
+     | `outbox_publish_failures_total` | counter | — | publisher da outbox |
+     | `wager_processing_duration_seconds` | histogram | `source`, `outcome` | use cases de processamento |
+     | `reconciliation_divergences_total` | counter | — | reconciliação |
+
+- **Consequências:** Cada prompt seguinte instrumenta o que implementa sem tocar na infraestrutura. O custo é que adicionar uma métrica exige editar `MetricsService`, o que mantém o catálogo e os rótulos num lugar só. Ficam fora de escopo health checks (prompt 14) e OpenTelemetry. Limitação: o contexto é por processo; a correlação entre serviços depende de o chamador enviar `X-Correlation-Id`.
 
 ### Modelo de Dados (Diagrama ER)
 
