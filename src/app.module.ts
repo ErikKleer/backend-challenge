@@ -4,7 +4,7 @@ import config from "../mikro-orm.config";
 import { ObservabilityModule } from "./shared/infrastructure/observability/observability.module";
 
 @Module({
-  imports: [MikroOrmModule.forRoot(config), ObservabilityModule],
+  imports: [MikroOrmModule.forRoot(config), ObservabilityModule.forRoot()],
 })
 class AppModuleCore {}
 

@@ -13,7 +13,7 @@ class ProbeController {
   }
 }
 
-@Module({ imports: [ObservabilityModule], controllers: [ProbeController] })
+@Module({ imports: [ObservabilityModule.forRoot({ level: "silent" })], controllers: [ProbeController] })
 class ProbeModule {}
 
 describe("correlation id middleware", () => {
