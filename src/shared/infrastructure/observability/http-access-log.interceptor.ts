@@ -19,7 +19,7 @@ interface HttpResponse {
   once(event: "finish", listener: () => void): unknown;
 }
 
-const QUIET_PATHS = new Set(["/metrics"]);
+const QUIET_PATHS = new Set(["/metrics", "/health/live", "/health/ready"]);
 
 /**
  * Log de acesso: método, rota, status e duração. Sem corpo, query string ou

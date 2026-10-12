@@ -9,8 +9,10 @@ import { EVENT_PUBLISHER_TOKEN, type EventPublisher } from "./application/event-
 import { OutboxBatchPublisher } from "./application/outbox-batch-publisher";
 import { OutboxPublisherWorker } from "./application/outbox-publisher.worker";
 import { OUTBOX_REPOSITORY_TOKEN, type OutboxRepository } from "./application/outbox.repository.port";
+import { SQS_READINESS_CHECK_TOKEN } from "../shared/application/readiness-check.port";
 import { createSqsClient } from "./infrastructure/sqs/sqs-client.factory";
 import { SqsEventPublisher } from "./infrastructure/sqs/sqs-event-publisher";
+import { SqsReadinessCheck } from "./infrastructure/sqs/sqs-readiness-check";
 import { SqsQueueUrlResolver } from "./infrastructure/sqs/sqs-queue-url.resolver";
 
 const MESSAGING_CONFIG_TOKEN = Symbol("MessagingConfig");
@@ -20,12 +22,15 @@ const OUTBOX_BATCH_PUBLISHER_TOKEN = Symbol("OutboxBatchPublisher");
 /**
  * Papéis de mensageria do processo. A configuração é lida de forma preguiçosa (dentro das
  * factories), para que importar o módulo não exija o ambiente completo, como nos testes de API.
+ *
+ * É global só para expor o check de readiness do SQS ao `HealthModule`.
  */
 @Module({})
 export class MessagingModule {
   public static forRoot(): DynamicModule {
     return {
       module: MessagingModule,
+      global: true,
       providers: [
         { provide: MESSAGING_CONFIG_TOKEN, useFactory: () => envSchema.parse(process.env) },
         {
@@ -57,6 +62,16 @@ export class MessagingModule {
             return new SqsEventPublisher(client, queueUrl);
           },
           inject: [SQS_CLIENT_TOKEN, MESSAGING_CONFIG_TOKEN, AppLogger],
+        },
+        {
+          // Readiness sobre a fila de transações (a que o consumidor lê), com o cliente de timeout curto
+          provide: SQS_READINESS_CHECK_TOKEN,
+          useFactory: (client: SQSClient, config: EnvConfig) =>
+            new SqsReadinessCheck(
+              client,
+              new SqsQueueUrlResolver(client, config.SQS_QUEUE_WAGER_TRANSACTIONS),
+            ),
+          inject: [SQS_CLIENT_TOKEN, MESSAGING_CONFIG_TOKEN],
         },
         {
           provide: OUTBOX_BATCH_PUBLISHER_TOKEN,
@@ -94,6 +109,7 @@ export class MessagingModule {
           inject: [OUTBOX_BATCH_PUBLISHER_TOKEN, AppLogger, MESSAGING_CONFIG_TOKEN],
         },
       ],
+      exports: [SQS_READINESS_CHECK_TOKEN],
     };
   }
 }

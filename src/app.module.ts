@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { MikroOrmModule } from "@mikro-orm/nestjs";
 import config from "../mikro-orm.config";
+import { HealthModule } from "./health/health.module";
 import { AuthModule } from "./auth/auth.module";
 import { MessagingModule } from "./messaging/messaging.module";
 import { ObservabilityModule } from "./shared/infrastructure/observability/observability.module";
@@ -26,6 +27,7 @@ export class ApiModule {}
     ObservabilityModule.forRoot(),
     MessagingModule.forRoot(),
     WagerTransactionsConsumerModule.forRoot(),
+    HealthModule.forRoot(),
     ApiModule,
   ],
 })

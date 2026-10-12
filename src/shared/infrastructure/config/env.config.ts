@@ -36,6 +36,8 @@ export const envSchema = z.object({
   SQS_RETRY_MAX_SECONDS: z.coerce.number().int().positive().default(60),
   /** Deve coincidir com o `maxReceiveCount` da redrive policy provisionada. */
   SQS_MAX_RECEIVE_COUNT: z.coerce.number().int().positive().default(5),
+  /** Prazo de cada dependência no `/health/ready`; curto para a sondagem nunca travar. */
+  HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(2000),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
   LOG_LEVEL: z.string().default("info"),
   PENDING_REFERENCE_BASE_DELAY_MS: z.coerce.number().int().positive().default(2000),
