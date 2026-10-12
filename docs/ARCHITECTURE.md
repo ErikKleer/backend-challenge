@@ -170,6 +170,12 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
   5. **Limitação de ordenação:** a ordem de publicação só é garantida por wallet quando há um único publisher ativo por vez. Com vários publishers, o evento de `walletVersion` N+1 pode ser publicado antes do N (cada publisher reclama um subconjunto e a publicação em si é concorrente). O FIFO ordena apenas o que chega ao broker. **O consumidor ordena e descarta duplicatas por `walletVersion`** (`WalletBalanceChanged`), não pela ordem de chegada. Não se usa lock global para forçar ordem (README §5.6).
 - **Consequências:** Publicação concorrente sem perda e sem duplicação indefinida (a duplicata eventual é absorvida pelo `eventId`). O custo é a ordenação best-effort no broker, compensada pelo versionamento no consumidor.
 
+### ADR 12: Observabilidade — contexto de execução, logs estruturados e métricas
+
+- **Contexto:** README §12 exige logs JSON com identificadores de correlação, sem dados sensíveis, e métricas de negócio. Todos os use cases seguintes precisam instrumentar o que implementam sem reinventar a infraestrutura.
+- **Decisão:**
+  1. **Contexto de execução (`AsyncLocalStorage`):** `runWithContext(ctx, fn)` abre o contexto (copiando o objeto) e `bindContext(partial)` o enriquece com `messageId`, `transactionId`, `walletId`, `providerId`; valores `undefined` não apagam o que já foi vinculado. O contexto é compartilhado por toda a execução; ramos de um `Promise.all` que precisem de ids próprios abrem um `runWithContext` aninhado. O middleware HTTP reaproveita `X-Correlation-Id` quando casa `^[A-Za-z0-9._:-]{1,128}$` (evita injeção em log/cabeçalho), gera UUID v7 caso contrário e devolve o header na resposta.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid
