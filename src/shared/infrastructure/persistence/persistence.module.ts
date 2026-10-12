@@ -11,6 +11,8 @@ import { WALLET_REPOSITORY_TOKEN } from "../../../wallet/application/wallet.repo
 import { MikroOrmWalletRepository } from "../../../wallet/infrastructure/persistence/wallet.repository";
 import { LEDGER_REPOSITORY_TOKEN } from "../../../wallet/application/ledger.repository.port";
 import { MikroOrmLedgerRepository } from "../../../wallet/infrastructure/persistence/ledger.repository";
+import { RECONCILIATION_REPOSITORY_TOKEN } from "../../../wallet/application/reconciliation.repository.port";
+import { MikroOrmReconciliationRepository } from "../../../wallet/infrastructure/persistence/reconciliation.repository";
 import { WAGER_TRANSACTION_REPOSITORY_TOKEN } from "../../../wagering/application/wager-transaction.repository.port";
 import { MikroOrmWagerTransactionRepository } from "../../../wagering/infrastructure/persistence/wager-transaction.repository";
 import { OUTBOX_REPOSITORY_TOKEN } from "../../../messaging/application/outbox.repository.port";
@@ -68,6 +70,11 @@ export class PersistenceModule {
         inject: [EntityManager],
       },
       {
+        provide: RECONCILIATION_REPOSITORY_TOKEN,
+        useFactory: (em: EntityManager) => new MikroOrmReconciliationRepository(em),
+        inject: [EntityManager],
+      },
+      {
         provide: WAGER_TRANSACTION_REPOSITORY_TOKEN,
         useFactory: (em: EntityManager) => {
           return new MikroOrmWagerTransactionRepository(em);
@@ -94,6 +101,7 @@ export class PersistenceModule {
         UNIT_OF_WORK_TOKEN,
         WALLET_REPOSITORY_TOKEN,
         LEDGER_REPOSITORY_TOKEN,
+        RECONCILIATION_REPOSITORY_TOKEN,
         WAGER_TRANSACTION_REPOSITORY_TOKEN,
         OUTBOX_REPOSITORY_TOKEN,
         INBOX_REPOSITORY_TOKEN,

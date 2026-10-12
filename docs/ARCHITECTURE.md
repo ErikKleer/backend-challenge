@@ -319,6 +319,16 @@ sequenceDiagram
 - **Decisão:** Duas rotas de leitura sobre a mesma visão (`WagerTransactionView`): `GET /wagering/transactions/:transactionId` e `GET /providers/:providerId/wagering/transactions/:externalTransactionId`. A visão traz `transactionId, providerId, externalTransactionId, status, kind, money, walletId, roundId, balance, createdAt` e, quando existem, `failureCode, referenceTransactionId, processedAt`. `balance` é o saldo **observado** gravado na decisão (o mesmo que o replay devolve), não o saldo atual da wallet. Inexistente ⇒ 404 `TRANSACTION_NOT_FOUND`; `transactionId` que não é UUID, ou `providerId`/`externalTransactionId` vazios ou acima de 128/255 caracteres ⇒ 400. Sem lock, sem transação de escrita; transações `OPENING` também são consultáveis.
 - **Consequências:** Usar o saldo observado mantém a consulta coerente com o replay do `POST` e imutável. Quem quer o saldo corrente lê `GET /wallets/:id`. A rota por provedor usa a unicidade `(provider_id, external_transaction_id)` do schema, sem varredura.
 
+### ADR 21: Reconciliação que reporta divergências sem corrigi-las
+
+- **Contexto:** `POST /wallets/:id/reconciliation` (README §9) prova a invariante `wallet.balance == saldo reconstruído pelo ledger`. Um "conserto automático" esconderia justamente o defeito que a reconciliação existe para expor.
+- **Decisão:**
+  1. **Um único statement.** Saldo da wallet, `SUM(CASE direction WHEN 'CREDIT' THEN amount ELSE -amount END)` e `COUNT(*)` do ledger saem de uma só consulta, que enxerga um único snapshot em READ COMMITTED: um débito que comite entre duas leituras separadas produziria uma falsa divergência. Sem lock, a soma é feita em `numeric` pelo PostgreSQL, nunca em `number`.
+  2. **Domínio simples:** `WalletReconciliation.check` calcula `difference = stored - calculated` com `Money` (pode ser negativa) e `consistent = difference == 0`.
+  3. **Divergência não é corrigida.** Ela gera `logger.error` estruturado (apenas `walletId`, `checkedEntries` e o sentido `stored_above_ledger`/`stored_below_ledger`; nunca valores, conforme a política do `AppLogger`), incrementa `reconciliation_divergences_total` e volta como `consistent: false` com status 200 (a conferência foi feita; o resultado é o dado). Wallet inexistente ⇒ 404; id que não é UUID ⇒ 400.
+  4. **Como testar a divergência:** o ledger é imutável por trigger, então o teste altera `wallets.balance` por SQL direto (a wallet não tem trigger sobre `balance`; só o `CHECK balance >= 0`) e verifica que a reconciliação acusa a diferença e que o saldo adulterado continua como está.
+- **Consequências:** A rota é segura para ser chamada com a carga em andamento e é idempotente. Ela é uma checagem sob demanda, não um corretor: a reação a `consistent: false` (alerta, investigação) é operacional.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

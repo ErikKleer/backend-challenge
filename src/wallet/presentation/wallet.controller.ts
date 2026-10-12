@@ -5,6 +5,7 @@ import { ZodValidationPipe } from "../../shared/presentation/zod-validation.pipe
 import { CreateWalletUseCase } from "../application/create-wallet.use-case";
 import { GetWalletUseCase } from "../application/get-wallet.use-case";
 import { ListWalletLedgerUseCase } from "../application/list-wallet-ledger.use-case";
+import { ReconcileWalletUseCase } from "../application/reconcile-wallet.use-case";
 import { type CreateWalletBody, CreateWalletBodySchema } from "./create-wallet.request";
 import { decodeLedgerCursor, encodeLedgerCursor, parseLedgerLimit } from "./ledger-cursor";
 
@@ -26,6 +27,15 @@ export interface LedgerEntryResponse {
   createdAt: string;
 }
 
+export interface ReconciliationResponse {
+  walletId: string;
+  storedBalance: MoneyProps;
+  calculatedBalance: MoneyProps;
+  difference: MoneyProps;
+  consistent: boolean;
+  checkedEntries: number;
+}
+
 export interface LedgerPageResponse {
   items: LedgerEntryResponse[];
   nextCursor: string | null;
@@ -37,6 +47,7 @@ export class WalletController {
     @Inject(CreateWalletUseCase) private readonly createWallet: CreateWalletUseCase,
     @Inject(GetWalletUseCase) private readonly getWallet: GetWalletUseCase,
     @Inject(ListWalletLedgerUseCase) private readonly listLedger: ListWalletLedgerUseCase,
+    @Inject(ReconcileWalletUseCase) private readonly reconcileWallet: ReconcileWalletUseCase,
   ) {}
 
   @Post()
@@ -92,6 +103,22 @@ export class WalletController {
       })),
       nextCursor:
         page.nextAfterVersion === undefined ? null : encodeLedgerCursor(page.nextAfterVersion),
+    };
+  }
+
+  @Post(":walletId/reconciliation")
+  @HttpCode(200)
+  public async reconcile(
+    @Param("walletId", new UuidParamPipe("walletId")) walletId: string,
+  ): Promise<ReconciliationResponse> {
+    const result = await this.reconcileWallet.execute(walletId);
+    return {
+      walletId: result.walletId,
+      storedBalance: result.storedBalance.toJSON(),
+      calculatedBalance: result.calculatedBalance.toJSON(),
+      difference: result.difference.toJSON(),
+      consistent: result.consistent,
+      checkedEntries: result.checkedEntries,
     };
   }
 }
