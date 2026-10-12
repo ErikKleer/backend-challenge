@@ -214,6 +214,20 @@ Serviço financeiro distribuído de alta concorrência para processamento de apo
   6. **Log do 500 sem SQL.** A mensagem de `InfrastructureError` carrega o SQL com seus parâmetros (inclusive valores monetários), então o filtro loga dele só o nome, o código e os frames da pilha; a política de não logar valores (ADR 12) vale também para falhas inesperadas.
 - **Consequências:** Cada endpoint novo só declara schema e códigos de erro. O custo é manter `DOMAIN_ERROR_HTTP_STATUS` sincronizada com os erros de domínio: um erro novo esquecido na tabela aparece como 500, o que os testes de cada endpoint pegam.
 
+### ADR 15: Criação de wallet e a transação interna `OPENING`
+
+- **Contexto:** Toda alteração de saldo precisa de lançamento no ledger (README §6.2), e o ledger referencia uma transação por FK. Uma wallet que nasce com saldo inicial maior que zero seria um saldo sem lançamento correspondente, quebrando a invariante `saldo = soma do ledger` desde o primeiro instante.
+- **Decisão:**
+  1. **Tudo em um único `UnitOfWork.run`**, na ordem imposta pelas FKs: `wallets` → `wager_transactions` → `wallet_ledger_entries` → `outbox_messages`. Qualquer falha reverte o conjunto (testado com falha injetada no `LedgerRepository`).
+  2. **Duplicata** `(playerId, currency)`: `insertIfAbsent` (`ON CONFLICT DO NOTHING`) devolve `false` ⇒ `WalletAlreadyExistsError` (409). Sob concorrência a unicidade vem do schema (`uq_wallets_player_currency`), não de checagem prévia: 10 criações simultâneas resultam em 1 wallet e 9 erros.
+  3. **Identidade interna do `OPENING`:** `providerId = "internal"`, `externalTransactionId = idempotencyKey = "opening:{walletId}"`, `roundId = gameId = "opening"`. É determinística por wallet, não colide com provedores reais e as unicidades de idempotência do schema valem para ela também. A API e a fila nunca aceitam `OPENING` (README §6.3). O `payloadHash` é calculado como nas demais transações.
+  4. **Nasce `PROCESSED`**, inserida já no estado final (`markProcessed` antes do `INSERT`), com `observedBalance` igual ao saldo inicial. Não passa por `PENDING`, pois não há nada a esperar e o trigger de imutabilidade do schema trata `UPDATE` de estado terminal como erro.
+  5. **Lançamento `CREDIT`** com `balanceBefore = 0.00`, `balanceAfter = saldo inicial` e `walletVersion = 1`. É montado diretamente, sem `Wallet.credit`, porque este incrementaria a versão: a wallet já nasce na versão 1 com o saldo inicial.
+  6. **Eventos:** `WagerTransactionProcessed` e `WalletBalanceChanged` (`aggregateId = walletId`, `eventId` determinístico por transação e tipo) entram na outbox na mesma transação, pois o saldo mudou de 0 para o inicial.
+  7. **Saldo inicial zero:** só a wallet, na versão 1; sem transação, lançamento nem evento, já que nenhum saldo mudou. O primeiro crédito real terá `walletVersion = 2`; por isso a invariante dos testes (`assertLedgerMatchesBalance`) compara `wallet.version` com a maior versão do ledger e aceita ledger vazio apenas com saldo 0.00 e versão 1.
+  8. **Observabilidade:** um log `wallet created` por criação (ids e moeda, sem valores) e `wager_transactions_total{kind="OPENING",status="PROCESSED"}`, ambos depois do commit.
+- **Consequências:** A invariante saldo = soma do ledger vale desde a criação, e quem audita ou reconcilia não precisa tratar wallets nascidas com saldo como caso especial. O custo é uma transação e um par de eventos a mais por criação com saldo; consumidores devem aceitar `kind = OPENING` e `providerId = "internal"` nos eventos.
+
 ### Modelo de Dados (Diagrama ER)
 
 ```mermaid

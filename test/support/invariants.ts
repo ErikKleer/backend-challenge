@@ -1,0 +1,57 @@
+import { expect } from "bun:test";
+import type { EntityManager } from "@mikro-orm/postgresql";
+
+/** Executor de SQL cru: `orm.em` ou um EntityManager transacional. */
+export type SqlExecutor = Pick<EntityManager, "execute">;
+
+interface WalletSummaryRow {
+  balance: string;
+  version: number;
+  ledger_sum: string;
+  entry_count: string;
+  last_balance_after: string | null;
+  max_version: number | null;
+}
+
+/**
+ * Invariante contábil central (README §6.2): o saldo da wallet é exatamente a soma do
+ * seu ledger. Também confere que o último `balance_after` e a última `wallet_version`
+ * do ledger coincidem com o estado da wallet. A soma é feita pelo PostgreSQL em
+ * `numeric`, sem passar por `number`.
+ */
+export async function assertLedgerMatchesBalance(
+  walletId: string,
+  db: SqlExecutor,
+): Promise<void> {
+  const rows = await db.execute<WalletSummaryRow[]>(
+    `SELECT w.balance::text AS balance,
+            w.version,
+            COALESCE(SUM(CASE WHEN l.direction = 'CREDIT' THEN l.amount ELSE -l.amount END), 0)::numeric(19,2)::text AS ledger_sum,
+            COUNT(l.id)::text AS entry_count,
+            (SELECT l2.balance_after::text FROM wallet_ledger_entries l2
+              WHERE l2.wallet_id = w.id ORDER BY l2.wallet_version DESC LIMIT 1) AS last_balance_after,
+            MAX(l.wallet_version) AS max_version
+       FROM wallets w
+       LEFT JOIN wallet_ledger_entries l ON l.wallet_id = w.id
+      WHERE w.id = ?
+      GROUP BY w.id`,
+    [walletId],
+  );
+
+  const row = rows[0];
+  if (!row) {
+    throw new Error(`Wallet '${walletId}' not found while checking ledger invariants`);
+  }
+
+  expect(Number(row.balance) >= 0).toBe(true);
+  // Comparação de texto: `numeric(19,2)` sempre sai com 2 casas.
+  expect(row.ledger_sum).toBe(row.balance);
+
+  if (Number(row.entry_count) === 0) {
+    expect(row.balance).toBe("0.00");
+    expect(row.version).toBe(1);
+    return;
+  }
+  expect(row.last_balance_after).toBe(row.balance);
+  expect(row.max_version).toBe(row.version);
+}
