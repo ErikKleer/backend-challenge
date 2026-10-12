@@ -55,3 +55,57 @@ export async function assertLedgerMatchesBalance(
   expect(row.last_balance_after).toBe(row.balance);
   expect(row.max_version).toBe(row.version);
 }
+
+interface LedgerVersionRow {
+  wallet_version: number;
+  direction: string;
+}
+
+export interface LedgerShape {
+  entries: number;
+  debits: number;
+  credits: number;
+}
+
+/**
+ * `UNIQUE(wallet_id, wallet_version)` impede repetição; aqui confere-se que também não
+ * há lacuna: as versões do ledger são exatamente 1..N, e N é a versão da wallet. Uma
+ * lacuna indicaria uma escrita perdida ou uma atualização de saldo sem lançamento.
+ */
+export async function assertLedgerVersionsContiguous(
+  walletId: string,
+  db: SqlExecutor,
+): Promise<LedgerShape> {
+  const rows = await db.execute<LedgerVersionRow[]>(
+    `SELECT wallet_version, direction
+       FROM wallet_ledger_entries
+      WHERE wallet_id = ?
+      ORDER BY wallet_version`,
+    [walletId],
+  );
+  const [wallet] = await db.execute<Array<{ version: number }>>(
+    "SELECT version FROM wallets WHERE id = ?",
+    [walletId],
+  );
+
+  expect(rows.map((row) => row.wallet_version)).toEqual(
+    Array.from({ length: rows.length }, (_unused, index) => index + 1),
+  );
+  if (rows.length > 0) {
+    expect(wallet?.version).toBe(rows.length);
+  }
+  return {
+    entries: rows.length,
+    debits: rows.filter((row) => row.direction === "DEBIT").length,
+    credits: rows.filter((row) => row.direction === "CREDIT").length,
+  };
+}
+
+/** Invariantes finais de todo teste de concorrência (README §13). */
+export async function assertWalletInvariants(
+  walletId: string,
+  db: SqlExecutor,
+): Promise<LedgerShape> {
+  await assertLedgerMatchesBalance(walletId, db);
+  return assertLedgerVersionsContiguous(walletId, db);
+}

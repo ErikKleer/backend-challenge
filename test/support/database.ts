@@ -20,7 +20,14 @@ export interface TestDatabaseContext {
  * e DELETE no ledger de auditoria) impedem limpeza e truncamento tradicionais entre
  * testes. O isolamento confiável vem de um banco exclusivo por suíte e IDs únicos por teste.
  */
-export async function createTestDatabase(): Promise<TestDatabaseContext> {
+export interface TestDatabaseOptions {
+  /** Teto do pool de conexões; testes de concorrência o ampliam para exercitar paralelismo real. */
+  poolMax?: number;
+}
+
+export async function createTestDatabase(
+  options: TestDatabaseOptions = {},
+): Promise<TestDatabaseContext> {
   const adminUrl =
     process.env.TEST_ADMIN_DATABASE_URL ||
     process.env.DATABASE_URL ||
@@ -46,6 +53,7 @@ export async function createTestDatabase(): Promise<TestDatabaseContext> {
     ...config,
     clientUrl: testDbUrl,
     dbName,
+    ...(options.poolMax !== undefined ? { pool: { min: 2, max: options.poolMax } } : {}),
     extensions: [Migrator],
     migrations: {
       path: "migrations",
