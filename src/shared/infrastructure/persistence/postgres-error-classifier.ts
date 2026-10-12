@@ -1,3 +1,4 @@
+import { DomainError } from "../../domain/domain.error";
 import {
   LockTimeoutError,
   PermanentInfrastructureError,
@@ -24,15 +25,18 @@ interface ErrorWithPotentialDbCodes {
  * Classifica e normaliza erros emitidos pelo driver PostgreSQL / MikroORM.
  *
  * Mapeamentos:
+ * - DomainError => propagado diretamente sem envelopamento
  * - 55P03 => LockTimeoutError (transient)
  * - 40P01 => TransientInfrastructureError (deadlock_detected)
  * - 40001 => TransientInfrastructureError (serialization_failure)
  * - 23505 => UniqueConstraintViolationError (unique_violation)
  * - Erros de rede/conexão (ECONNREFUSED, ETIMEDOUT, 08000, 08003, 08006, 57P01) => TransientInfrastructureError
- * - Demais => PermanentInfrastructureError ou propaga a própria exceção se já classificada
+ * - Demais erros não-banco => propagados intactos se não forem do driver
+ * - Demais erros do banco => PermanentInfrastructureError
  */
 export function classifyPostgreSqlError(error: unknown): Error {
   if (
+    error instanceof DomainError ||
     error instanceof TransientInfrastructureError ||
     error instanceof PermanentInfrastructureError
   ) {
@@ -108,10 +112,29 @@ export function classifyPostgreSqlError(error: unknown): Error {
     );
   }
 
-  // Outros erros de banco não classificados como transitórios
+  // Se o erro tem código de SQLSTATE de 5 caracteres do PostgreSQL ou veio de driver de banco
+  if (
+    sqlState.length === 5 ||
+    Boolean(dbErr?.routine) ||
+    Boolean(dbErr?.parent) ||
+    (error instanceof Error && error.constructor.name.includes("DriverException"))
+  ) {
+    return new PermanentInfrastructureError(
+      `Database permanent error: ${rawMessage}`,
+      "PERMANENT_DATABASE_ERROR",
+      error,
+    );
+  }
+
+  // Se for um erro regular de aplicação/negócio (ex: throw new Error("...")), propaga intacto
+  if (error instanceof Error) {
+    return error;
+  }
+
   return new PermanentInfrastructureError(
-    `Database permanent error: ${rawMessage}`,
-    "PERMANENT_DATABASE_ERROR",
+    `Unknown permanent error: ${rawMessage}`,
+    "PERMANENT_INFRASTRUCTURE_ERROR",
     error,
   );
 }
+
