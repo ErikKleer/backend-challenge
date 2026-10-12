@@ -68,6 +68,15 @@ export class WagerSettlementService {
 
     const entry = await this.apply(decision, transaction, wallet, reference, context.now);
     await this.enqueueEvents(transaction, wallet, entry, context);
+
+    if (transaction.status === WagerTransactionStatus.Processed) {
+      // Dependentes que esperavam esta transação não precisam aguardar o backoff
+      await this.transactions.wakePendingDependents(
+        transaction.providerId,
+        transaction.externalTransactionId,
+        context.now,
+      );
+    }
   }
 
   private async apply(

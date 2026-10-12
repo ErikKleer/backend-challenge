@@ -40,6 +40,14 @@ export interface WagerTransactionRepository {
   findDuePendingReference(now: Date, limit: number): Promise<WagerTransaction[]>;
 
   /**
+   * Antecipa para `now` a próxima tentativa das transações `PENDING_REFERENCE` do provedor
+   * que aguardam a referência informada. Linhas já travadas por um worker são puladas
+   * (`SKIP LOCKED`), então este método nunca espera por uma linha de transação: o worker
+   * que a segura já vai reler a referência sob o lock da wallet. Devolve quantas acordou.
+   */
+  wakePendingDependents(providerId: string, referenceExternalTransactionId: string, now: Date): Promise<number>;
+
+  /**
    * Atualiza os campos mutáveis da transação (status, failureCode, referenceTransactionId,
    * observedBalance, referenceAttempts, nextReferenceAttemptAt, processedAt) e grava `at`
    * em `updated_at`, de modo que rejeições e esperas por referência também o avançam.

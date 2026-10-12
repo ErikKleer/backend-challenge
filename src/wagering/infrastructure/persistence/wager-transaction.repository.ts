@@ -146,6 +146,32 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     }
   }
 
+  public async wakePendingDependents(
+    providerId: string,
+    referenceExternalTransactionId: string,
+    now: Date,
+  ): Promise<number> {
+    try {
+      // A seleção com SKIP LOCKED mantém a ordem de locks: quem a executa já segura a wallet
+      // e jamais espera pela linha de uma dependente que um worker esteja processando
+      const rows = await this.em.execute<Array<{ id: string }>>(
+        `UPDATE wager_transactions
+         SET next_reference_attempt_at = ?, updated_at = ?
+         WHERE id IN (
+           SELECT id FROM wager_transactions
+           WHERE provider_id = ? AND reference_external_transaction_id = ?
+             AND status = 'PENDING_REFERENCE' AND next_reference_attempt_at > ?
+           FOR UPDATE SKIP LOCKED
+         )
+         RETURNING id`,
+        [now, now, providerId, referenceExternalTransactionId, now],
+      );
+      return rows?.length ?? 0;
+    } catch (error) {
+      throw classifyPostgreSqlError(error);
+    }
+  }
+
   public async save(transaction: WagerTransaction, at: Date): Promise<void> {
     try {
       const row = WagerTransactionPersistenceMapper.toRow(transaction, at);

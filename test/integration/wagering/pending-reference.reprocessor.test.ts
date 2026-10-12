@@ -340,4 +340,57 @@ describe("PendingReferenceReprocessor (PostgreSQL)", () => {
       await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
     });
   });
+
+  describe("waking dependents", () => {
+    it("makes a pending reversal due as soon as its reference is processed", async () => {
+      const wallet = await harness.createWallet("100.00");
+      const refund = await harness.useCase.execute(pendingReversal(wallet, Refund, "bet-wake"));
+      expect((await harness.reprocessor.runOnce()).claimed).toBe(0);
+
+      await harness.useCase.execute(
+        harness.command(wallet, { externalTransactionId: "bet-wake", kind: Bet }),
+      );
+
+      // Sem avançar o relógio: a espera de backoff foi antecipada pela BET processada
+      expect((await storedOf(refund.transactionId)).attempts).toBe(0);
+      expect((await harness.reprocessor.runOnce()).claimed).toBe(1);
+      expect((await storedOf(refund.transactionId)).status).toBe("PROCESSED");
+      expect(await walletOf(wallet.walletId)).toMatchObject({ balance: "100.00" });
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
+    });
+
+    it("leaves dependents of other providers and unrelated references waiting", async () => {
+      const wallet = await harness.createWallet("100.00");
+      const otherProvider = await harness.useCase.execute(
+        harness.command(wallet, {
+          providerId: "provider-other",
+          kind: Refund,
+          referenceExternalTransactionId: "bet-shared",
+          money: brl("10.00"),
+        }),
+      );
+      const otherReference = await harness.useCase.execute(pendingReversal(wallet, Refund, "bet-unrelated"));
+
+      await harness.useCase.execute(
+        harness.command(wallet, { externalTransactionId: "bet-shared", kind: Bet }),
+      );
+
+      expect((await harness.reprocessor.runOnce()).claimed).toBe(0);
+      expect((await storedOf(otherProvider.transactionId)).status).toBe("PENDING_REFERENCE");
+      expect((await storedOf(otherReference.transactionId)).status).toBe("PENDING_REFERENCE");
+    });
+
+    it("does not wake dependents when the reference is rejected", async () => {
+      const wallet = await harness.createWallet("5.00");
+      const refund = await harness.useCase.execute(pendingReversal(wallet, Refund, "bet-denied"));
+
+      const bet = await harness.useCase.execute(
+        harness.command(wallet, { externalTransactionId: "bet-denied", kind: Bet, money: brl("10.00") }),
+      );
+      expect(bet.status).toBe(WagerTransactionStatus.Rejected);
+
+      expect((await harness.reprocessor.runOnce()).claimed).toBe(0);
+      expect((await storedOf(refund.transactionId)).status).toBe("PENDING_REFERENCE");
+    });
+  });
 });
