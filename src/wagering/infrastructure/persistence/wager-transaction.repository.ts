@@ -127,6 +127,25 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     }
   }
 
+  public async findDuePendingReference(now: Date, limit: number): Promise<WagerTransaction[]> {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new RangeError("findDuePendingReference limit must be a positive integer");
+    }
+    try {
+      const rows = await this.em.execute<WagerTransactionRow[]>(
+        `SELECT ${SELECT_COLS} FROM wager_transactions
+         WHERE status = 'PENDING_REFERENCE' AND next_reference_attempt_at <= ?
+         ORDER BY next_reference_attempt_at ASC, id ASC
+         LIMIT ?
+         FOR UPDATE SKIP LOCKED`,
+        [now, limit],
+      );
+      return (rows ?? []).map((row) => WagerTransactionPersistenceMapper.toDomain(row));
+    } catch (error) {
+      throw classifyPostgreSqlError(error);
+    }
+  }
+
   public async save(transaction: WagerTransaction, at: Date): Promise<void> {
     try {
       const row = WagerTransactionPersistenceMapper.toRow(transaction, at);

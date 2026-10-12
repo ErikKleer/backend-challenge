@@ -5,7 +5,9 @@ import { MetricsService } from "../../src/shared/infrastructure/observability/me
 import { CreateWalletUseCase } from "../../src/wallet/application/create-wallet.use-case";
 import type { OutboxRepository } from "../../src/messaging/application/outbox.repository.port";
 import type { LedgerRepository } from "../../src/wallet/application/ledger.repository.port";
+import type { Clock } from "../../src/shared/application/clock.port";
 import type { PendingReferencePolicy } from "../../src/wagering/application/pending-reference-policy";
+import { PendingReferenceReprocessor } from "../../src/wagering/application/pending-reference.reprocessor";
 import type { SubmitWagerTransactionCommand } from "../../src/wagering/application/submit-wager-transaction.command";
 import { SubmitWagerTransactionUseCase } from "../../src/wagering/application/submit-wager-transaction.use-case";
 import { WagerSettlementService } from "../../src/wagering/application/wager-settlement.service";
@@ -25,7 +27,19 @@ export interface WalletFixture {
   playerId: string;
 }
 
+/** Backoff reduzido para os testes do worker: a espera é de milissegundos, não de segundos. */
+export const FAST_PENDING_POLICY: PendingReferencePolicy = {
+  baseDelayMs: 10,
+  maxDelayMs: 40,
+  maxAttempts: 3,
+};
+
 export interface WageringHarnessOverrides {
+  pendingPolicy?: PendingReferencePolicy;
+  /** Relógio do caso de uso e do reprocessador (padrão: o do contexto). */
+  clock?: Clock;
+  /** Lote do reprocessador; padrão 20. */
+  reprocessBatchSize?: number;
   /** Wrapper com falha injetada em volta do repositório real. */
   ledger?: LedgerRepository;
   outbox?: OutboxRepository;
@@ -40,6 +54,7 @@ export class WageringHarness {
   public readonly logger = new AppLogger({ level: "silent" });
   public readonly settlement: WagerSettlementService;
   public readonly useCase: SubmitWagerTransactionUseCase;
+  public readonly reprocessor: PendingReferenceReprocessor;
 
   constructor(
     public readonly ctx: PersistenceTestContext,
@@ -51,8 +66,9 @@ export class WageringHarness {
       overrides.ledger ?? ctx.ledgerRepo,
       overrides.outbox ?? ctx.outboxRepo,
       ctx.idGenerator,
-      TEST_PENDING_POLICY,
+      overrides.pendingPolicy ?? TEST_PENDING_POLICY,
     );
+    const clock = overrides.clock ?? ctx.clock;
     this.useCase = new SubmitWagerTransactionUseCase(
       ctx.unitOfWork,
       ctx.walletRepo,
@@ -60,9 +76,19 @@ export class WageringHarness {
       ctx.inboxRepo,
       this.settlement,
       ctx.idGenerator,
-      ctx.clock,
+      clock,
       this.logger,
       this.metrics,
+    );
+    this.reprocessor = new PendingReferenceReprocessor(
+      ctx.unitOfWork,
+      ctx.transactionRepo,
+      this.settlement,
+      ctx.idGenerator,
+      clock,
+      this.logger,
+      this.metrics,
+      { batchSize: overrides.reprocessBatchSize ?? 20 },
     );
   }
 

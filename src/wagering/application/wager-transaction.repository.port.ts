@@ -33,6 +33,13 @@ export interface WagerTransactionRepository {
   findReversalOf(referenceTransactionId: string): Promise<WagerTransaction | null>;
 
   /**
+   * Reclama transações `PENDING_REFERENCE` com `next_reference_attempt_at <= now`, as mais
+   * atrasadas primeiro, com `FOR UPDATE SKIP LOCKED`: um worker concorrente nunca espera nem
+   * recebe a mesma linha. Exige transação ativa, pois o lock vale até o commit.
+   */
+  findDuePendingReference(now: Date, limit: number): Promise<WagerTransaction[]>;
+
+  /**
    * Atualiza os campos mutáveis da transação (status, failureCode, referenceTransactionId,
    * observedBalance, referenceAttempts, nextReferenceAttemptAt, processedAt) e grava `at`
    * em `updated_at`, de modo que rejeições e esperas por referência também o avançam.

@@ -103,14 +103,26 @@ export class WagerSettlementService {
         transaction.reject(decision.code, wallet.balance);
         break;
       case "PENDING_REFERENCE":
-        transaction.markPendingReference(
-          wallet.balance,
-          new Date(now.getTime() + this.pendingPolicy.baseDelayMs),
-        );
+        if (transaction.status === WagerTransactionStatus.PendingReference) {
+          // Reprocessamento: a referência ainda não está resolvida, recua o backoff
+          const attempts = transaction.referenceAttempts + 1;
+          transaction.scheduleReferenceRetry(new Date(now.getTime() + this.backoffDelayMs(attempts)));
+        } else {
+          transaction.markPendingReference(
+            wallet.balance,
+            new Date(now.getTime() + this.pendingPolicy.baseDelayMs),
+          );
+        }
         break;
     }
     await this.transactions.save(transaction, now);
     return entry;
+  }
+
+  /** `min(base × 2^tentativas, teto)`; a primeira espera (tentativa 0) é a própria base. */
+  private backoffDelayMs(attempts: number): number {
+    const { baseDelayMs, maxDelayMs } = this.pendingPolicy;
+    return Math.min(baseDelayMs * 2 ** attempts, maxDelayMs);
   }
 
   /**
@@ -141,6 +153,10 @@ export class WagerSettlementService {
         );
         break;
       case WagerTransactionStatus.PendingReference:
+        // O aviso de espera já saiu na primeira vez; tentativas seguintes não repetem o evento
+        if (transaction.referenceAttempts > 0) {
+          break;
+        }
         await this.outbox.enqueue(
           OutboxMessage.enqueue(WagerTransactionPendingReference.from(transaction, context)),
         );

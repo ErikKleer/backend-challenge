@@ -41,6 +41,8 @@ export const envSchema = z.object({
   PENDING_REFERENCE_BASE_DELAY_MS: z.coerce.number().int().positive().default(2000),
   PENDING_REFERENCE_MAX_DELAY_MS: z.coerce.number().int().positive().default(60000),
   PENDING_REFERENCE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
+  PENDING_WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
+  PENDING_WORKER_BATCH_SIZE: z.coerce.number().int().positive().default(20),
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
   OUTBOX_BATCH_SIZE: z.coerce.number().int().positive().default(10),
   ENABLE_HTTP: booleanFlag(true),
