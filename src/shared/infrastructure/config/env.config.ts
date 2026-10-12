@@ -9,6 +9,7 @@ export const envSchema = z.object({
   AWS_ENDPOINT: z.string().url().optional(),
   AWS_ACCESS_KEY_ID: z.string().default("dummy"),
   AWS_SECRET_ACCESS_KEY: z.string().default("dummy"),
+  SQS_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(3000),
   SQS_QUEUE_WAGER_TRANSACTIONS: z.string(),
   SQS_QUEUE_WAGER_TRANSACTIONS_DLQ: z.string(),
   SQS_QUEUE_WAGER_EVENTS: z.string(),
