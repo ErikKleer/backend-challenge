@@ -1,5 +1,7 @@
 import { expect } from "bun:test";
 import type { EntityManager } from "@mikro-orm/postgresql";
+import { MikroOrmReconciliationRepository } from "../../src/wallet/infrastructure/persistence/reconciliation.repository";
+import { WalletReconciliation } from "../../src/wallet/domain/wallet-reconciliation";
 
 /** Executor de SQL cru: `orm.em` ou um EntityManager transacional. */
 export type SqlExecutor = Pick<EntityManager, "execute">;
@@ -108,4 +110,31 @@ export async function assertWalletInvariants(
 ): Promise<LedgerShape> {
   await assertLedgerMatchesBalance(walletId, db);
   return assertLedgerVersionsContiguous(walletId, db);
+}
+
+/**
+ * Verificação transversal do fim de cada teste multiprocesso: **todas** as wallets do banco
+ * têm saldo igual à soma do ledger (a mesma consulta do `GET /wallets/:id/reconciliation`),
+ * versões de ledger sem lacuna e nenhuma divergência escondida em outra wallet. Devolve a
+ * quantidade de wallets conferidas, para o teste garantir que não verificou um banco vazio.
+ */
+export async function assertAllWalletsConsistent(db: EntityManager): Promise<number> {
+  const reconciliation = new MikroOrmReconciliationRepository(db);
+  const wallets = await db.execute<Array<{ id: string }>>("SELECT id FROM wallets ORDER BY id");
+
+  for (const { id } of wallets) {
+    const snapshot = await reconciliation.snapshot(id);
+    const result = WalletReconciliation.check(snapshot!);
+    expect(`${id}:${result.difference.toJSON().amount}`).toBe(`${id}:0.00`);
+    await assertWalletInvariants(id, db);
+  }
+  return wallets.length;
+}
+
+/** Nenhuma transação ficou em `PENDING` (inserção e liquidação são uma transação SQL só). */
+export async function assertNoStuckTransactions(db: SqlExecutor): Promise<void> {
+  const [row] = await db.execute<Array<{ n: string }>>(
+    "SELECT COUNT(*)::text AS n FROM wager_transactions WHERE status = 'PENDING'",
+  );
+  expect(row?.n).toBe("0");
 }
