@@ -404,4 +404,69 @@ describe("wager transactions consumer", () => {
       await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
     });
   });
+
+  describe("crash after commit and before the acknowledgement", () => {
+    it("redelivers the message, discards it through the inbox and acknowledges it", async () => {
+      let acknowledgeCalls = 0;
+      rig = buildConsumerRig(ctx, queues, {
+        // O worker "morre" entre o commit e o DeleteMessage: o primeiro ack nunca chega ao SQS
+        acknowledger: (real) => ({
+          acknowledge: async (message) => {
+            acknowledgeCalls += 1;
+            if (acknowledgeCalls === 1) {
+              throw new Error("injected crash before the acknowledgement");
+            }
+            await real.acknowledge(message);
+          },
+          changeVisibility: (message, seconds) => real.changeVisibility(message, seconds),
+        }),
+      });
+      const wallet = await rig.harness.createWallet("100.00");
+      const command = rig.harness.command(wallet, { money: brl("30.00") });
+      const { suffix, ids } = messageIds("msg-crash");
+
+      await sendWagerMessage(queues, wallet, command, ids[0]!);
+      rig.poller.start();
+      await waitFor(() => acknowledgeCalls === 1, { description: "first (lost) acknowledgement" });
+      // O efeito já está commitado enquanto a mensagem continua na fila
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
+      expect(await isQueueEmpty(queues.client, queues.transactionsUrl)).toBe(false);
+
+      await queueDrained();
+      await rig.poller.stop();
+
+      expect(acknowledgeCalls).toBe(2);
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
+      expect(await transactionCount(wallet.walletId)).toBe(1);
+      expect(await inboxRows(suffix)).toEqual([{ messageId: ids[0]!, processed: true }]);
+      expect(await counterValue(rig.metrics, "wager_duplicates_total", { source: "sqs", type: "replay" })).toBe(1);
+      expect(await counterValue(rig.metrics, "wager_retries_total", { reason: "redelivery" })).toBe(1);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+    });
+  });
+
+  describe("many wallets in parallel", () => {
+    it("applies every message exactly once and keeps each ledger equal to its balance", async () => {
+      const wallets = await Promise.all(Array.from({ length: 8 }, () => rig.harness.createWallet("100.00")));
+      // 3 apostas distintas por wallet, mais uma cópia redelivered de cada primeira aposta
+      for (const wallet of wallets) {
+        const bets = [0, 1, 2].map(() => rig.harness.command(wallet, { money: brl("10.00") }));
+        for (const bet of bets) {
+          await sendWagerMessage(queues, wallet, bet, messageIds("msg-par").ids[0]!);
+        }
+        await sendWagerMessage(queues, wallet, bets[0]!, `dup-${bets[0]!.idempotencyKey}`);
+      }
+
+      rig.poller.start();
+      await queueDrained();
+      await rig.poller.stop();
+
+      for (const wallet of wallets) {
+        expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 4 });
+        expect(await transactionCount(wallet.walletId)).toBe(3);
+        await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+      }
+      expect(await isQueueEmpty(queues.client, queues.dlqUrl)).toBe(true);
+    });
+  });
 });
