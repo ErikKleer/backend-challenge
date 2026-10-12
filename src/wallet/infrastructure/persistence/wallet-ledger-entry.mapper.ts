@@ -1,4 +1,5 @@
 import { Money } from "../../../shared/domain/money";
+import { toDate } from "../../../shared/infrastructure/persistence/timestamps";
 import { LedgerDirection, WalletLedgerEntry } from "../../domain/wallet-ledger-entry";
 import type { WalletLedgerEntryRow } from "./wallet-ledger-entry.entity-schema";
 
@@ -38,7 +39,7 @@ export class WalletLedgerEntryPersistenceMapper {
       balanceBefore,
       balanceAfter,
       walletVersion: row.walletVersion,
-      createdAt: row.createdAt,
+      createdAt: toDate(row.createdAt),
     });
   }
 }

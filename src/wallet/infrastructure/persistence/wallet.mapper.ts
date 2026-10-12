@@ -1,4 +1,5 @@
 import { Money } from "../../../shared/domain/money";
+import { toDate } from "../../../shared/infrastructure/persistence/timestamps";
 import { Wallet } from "../../domain/wallet";
 import type { WalletRow } from "./wallet.entity-schema";
 
@@ -29,8 +30,8 @@ export class WalletPersistenceMapper {
       currency: row.currency,
       balance,
       version: row.version,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
+      createdAt: toDate(row.createdAt),
+      updatedAt: toDate(row.updatedAt),
     });
   }
 }

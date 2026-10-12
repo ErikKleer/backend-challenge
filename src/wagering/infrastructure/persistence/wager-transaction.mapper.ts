@@ -1,4 +1,5 @@
 import { Money } from "../../../shared/domain/money";
+import { toDate, toOptionalDate } from "../../../shared/infrastructure/persistence/timestamps";
 import {
   type FailureCode,
   type WagerTransactionKind,
@@ -60,14 +61,14 @@ export class WagerTransactionPersistenceMapper {
       kind: row.kind as WagerTransactionKind,
       money,
       referenceExternalTransactionId: row.referenceExternalTransactionId ?? undefined,
-      createdAt: row.createdAt,
+      createdAt: toDate(row.createdAt),
       status: row.status as WagerTransactionStatus,
       referenceTransactionId: row.referenceTransactionId ?? undefined,
       failureCode: (row.failureCode as FailureCode) ?? undefined,
-      processedAt: row.processedAt ?? undefined,
+      processedAt: toOptionalDate(row.processedAt),
       observedBalance,
       referenceAttempts: row.referenceAttempts,
-      nextReferenceAttemptAt: row.nextReferenceAttemptAt ?? undefined,
+      nextReferenceAttemptAt: toOptionalDate(row.nextReferenceAttemptAt),
     });
   }
 }
