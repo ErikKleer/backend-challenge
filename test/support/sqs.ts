@@ -1,7 +1,9 @@
 import {
   DeleteMessageBatchCommand,
   DeleteQueueCommand,
+  GetQueueAttributesCommand,
   ReceiveMessageCommand,
+  SendMessageCommand,
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { randomBytes } from "node:crypto";
@@ -17,7 +19,11 @@ export interface TestQueues {
   /** Nome da fila de eventos (com prefixo único), como o publisher a resolve. */
   eventsQueueName: string;
   eventsUrl: string;
+  /** Nome da fila de transações (com prefixo único), como o consumidor a resolve. */
+  transactionsQueueName: string;
   transactionsUrl: string;
+  /** Nome da DLQ (com prefixo único). */
+  dlqQueueName: string;
   dlqUrl: string;
   teardown: () => Promise<void>;
 }
@@ -32,15 +38,22 @@ export interface ReceivedMessage {
  * Provisiona um trio de filas com prefixo aleatório no LocalStack real: cada suíte tem as
  * suas, então o conteúdo de uma nunca aparece em outra e não há limpeza entre suítes.
  */
-export async function createTestQueues(): Promise<TestQueues> {
+export interface TestQueuesOptions {
+  /** Default 5s: uma mensagem recebida e não apagada reaparece rápido. */
+  visibilityTimeoutSeconds?: number;
+  /** Entregas antes de a redrive policy mandar a mensagem para a DLQ (default do provisionamento). */
+  maxReceiveCount?: number;
+}
+
+export async function createTestQueues(options: TestQueuesOptions = {}): Promise<TestQueues> {
   const prefix = `t${randomBytes(5).toString("hex")}-`;
   const provisioned = await provisionQueues({
     endpoint: TEST_SQS_ENDPOINT,
     region: TEST_REGION,
     credentials: TEST_CREDENTIALS,
     prefix,
-    // Visibilidade curta: uma mensagem recebida e não apagada por um teste reaparece rápido
-    visibilityTimeoutSeconds: 5,
+    visibilityTimeoutSeconds: options.visibilityTimeoutSeconds ?? 5,
+    ...(options.maxReceiveCount !== undefined ? { maxReceiveCount: options.maxReceiveCount } : {}),
   });
   const client = createSqsClient({
     region: TEST_REGION,
@@ -53,6 +66,8 @@ export async function createTestQueues(): Promise<TestQueues> {
     client,
     eventsQueueName: `${prefix}wager-events.fifo`,
     eventsUrl: provisioned.eventsUrl,
+    transactionsQueueName: `${prefix}wager-transactions.fifo`,
+    dlqQueueName: `${prefix}wager-transactions-dlq.fifo`,
     transactionsUrl: provisioned.transactionsUrl,
     dlqUrl: provisioned.dlqUrl,
     teardown: async () => {
@@ -116,4 +131,51 @@ export async function receiveUntil(
 /** `eventId` de cada mensagem recebida, na ordem de chegada (com repetições, se houver). */
 export function eventIdsOf(received: ReceivedMessage[]): string[] {
   return received.map((message) => (JSON.parse(message.body) as { eventId: string }).eventId);
+}
+
+/** Envia uma mensagem à fila (FIFO). A deduplicação do broker só se evita com `deduplicationId` distinto. */
+export async function sendMessage(
+  client: SQSClient,
+  queueUrl: string,
+  body: string,
+  options: { groupId?: string; deduplicationId?: string } = {},
+): Promise<void> {
+  await client.send(
+    new SendMessageCommand({
+      QueueUrl: queueUrl,
+      MessageBody: body,
+      MessageGroupId: options.groupId ?? "group-default",
+      MessageDeduplicationId: options.deduplicationId ?? randomBytes(12).toString("hex"),
+    }),
+  );
+}
+
+export interface QueueCounts {
+  visible: number;
+  inFlight: number;
+  delayed: number;
+}
+
+/** Contagens aproximadas do broker; "vazia" é `visible + inFlight + delayed === 0`. */
+export async function queueCounts(client: SQSClient, queueUrl: string): Promise<QueueCounts> {
+  const { Attributes } = await client.send(
+    new GetQueueAttributesCommand({
+      QueueUrl: queueUrl,
+      AttributeNames: [
+        "ApproximateNumberOfMessages",
+        "ApproximateNumberOfMessagesNotVisible",
+        "ApproximateNumberOfMessagesDelayed",
+      ],
+    }),
+  );
+  return {
+    visible: Number(Attributes?.ApproximateNumberOfMessages ?? 0),
+    inFlight: Number(Attributes?.ApproximateNumberOfMessagesNotVisible ?? 0),
+    delayed: Number(Attributes?.ApproximateNumberOfMessagesDelayed ?? 0),
+  };
+}
+
+export async function isQueueEmpty(client: SQSClient, queueUrl: string): Promise<boolean> {
+  const counts = await queueCounts(client, queueUrl);
+  return counts.visible + counts.inFlight + counts.delayed === 0;
 }

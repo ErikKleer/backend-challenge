@@ -12,7 +12,7 @@ const SUBMITTABLE_KINDS = [
   WagerTransactionKind.Rollback,
 ] as const;
 
-function boundedText(field: string, maxLength: number) {
+export function boundedText(field: string, maxLength: number) {
   return z
     .string({
       required_error: `${field} is required`,

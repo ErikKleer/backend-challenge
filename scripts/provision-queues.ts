@@ -11,6 +11,7 @@ async function main() {
       accessKeyId: config.AWS_ACCESS_KEY_ID,
       secretAccessKey: config.AWS_SECRET_ACCESS_KEY,
     },
+    maxReceiveCount: config.SQS_MAX_RECEIVE_COUNT,
     queues: {
       transactions: config.SQS_QUEUE_WAGER_TRANSACTIONS,
       dlq: config.SQS_QUEUE_WAGER_TRANSACTIONS_DLQ,
