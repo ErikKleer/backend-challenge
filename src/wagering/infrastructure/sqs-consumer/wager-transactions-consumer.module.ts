@@ -1,10 +1,15 @@
 import { type DynamicModule, Module } from "@nestjs/common";
 import type { SQSClient } from "@aws-sdk/client-sqs";
 import {
+  DEAD_LETTER_PUBLISHER_TOKEN,
+  type DeadLetterPublisher,
+} from "../../../messaging/application/dead-letter-publisher.port";
+import {
   MESSAGE_ACKNOWLEDGER_TOKEN,
   type MessageAcknowledger,
 } from "../../../messaging/application/message-acknowledger.port";
 import { createSqsClient } from "../../../messaging/infrastructure/sqs/sqs-client.factory";
+import { SqsDeadLetterPublisher } from "../../../messaging/infrastructure/sqs/sqs-dead-letter-publisher";
 import { SqsMessageAcknowledger } from "../../../messaging/infrastructure/sqs/sqs-message-acknowledger";
 import { SqsMessagePoller } from "../../../messaging/infrastructure/sqs/sqs-message-poller";
 import { SqsQueueUrlResolver } from "../../../messaging/infrastructure/sqs/sqs-queue-url.resolver";
@@ -19,6 +24,7 @@ import { WagerTransactionsConsumer } from "./wager-transactions-consumer";
 const CONSUMER_CONFIG_TOKEN = Symbol("WagerTransactionsConsumerConfig");
 const CONSUMER_SQS_CLIENT_TOKEN = Symbol("WagerTransactionsConsumerSqsClient");
 const TRANSACTIONS_QUEUE_URL_TOKEN = Symbol("WagerTransactionsQueueUrl");
+const DLQ_URL_TOKEN = Symbol("WagerTransactionsDlqUrl");
 const MESSAGE_HANDLER_TOKEN = Symbol("WagerTransactionMessageHandler");
 const POLLER_TOKEN = Symbol("WagerTransactionsPoller");
 
@@ -65,15 +71,28 @@ export class WagerTransactionsConsumerModule {
           inject: [CONSUMER_SQS_CLIENT_TOKEN, TRANSACTIONS_QUEUE_URL_TOKEN],
         },
         {
+          provide: DLQ_URL_TOKEN,
+          useFactory: (client: SQSClient, config: EnvConfig) =>
+            new SqsQueueUrlResolver(client, config.SQS_QUEUE_WAGER_TRANSACTIONS_DLQ),
+          inject: [CONSUMER_SQS_CLIENT_TOKEN, CONSUMER_CONFIG_TOKEN],
+        },
+        {
+          provide: DEAD_LETTER_PUBLISHER_TOKEN,
+          useFactory: (client: SQSClient, queueUrl: SqsQueueUrlResolver) =>
+            new SqsDeadLetterPublisher(client, queueUrl),
+          inject: [CONSUMER_SQS_CLIENT_TOKEN, DLQ_URL_TOKEN],
+        },
+        {
           provide: MESSAGE_HANDLER_TOKEN,
           useFactory: (
             useCase: SubmitWagerTransactionUseCase,
             acknowledger: MessageAcknowledger,
+            deadLetters: DeadLetterPublisher,
             logger: AppLogger,
             metrics: MetricsService,
             config: EnvConfig,
           ) =>
-            new WagerTransactionMessageHandler(useCase, acknowledger, logger, metrics, {
+            new WagerTransactionMessageHandler(useCase, acknowledger, deadLetters, logger, metrics, {
               retryBaseSeconds: config.SQS_RETRY_BASE_SECONDS,
               retryMaxSeconds: config.SQS_RETRY_MAX_SECONDS,
               maxReceiveCount: config.SQS_MAX_RECEIVE_COUNT,
@@ -81,6 +100,7 @@ export class WagerTransactionsConsumerModule {
           inject: [
             SubmitWagerTransactionUseCase,
             MESSAGE_ACKNOWLEDGER_TOKEN,
+            DEAD_LETTER_PUBLISHER_TOKEN,
             AppLogger,
             MetricsService,
             CONSUMER_CONFIG_TOKEN,

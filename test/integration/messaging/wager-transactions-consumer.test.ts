@@ -1,11 +1,11 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createTestDatabase, type TestDatabaseContext } from "../../support/database";
 import { assertLedgerMatchesBalance } from "../../support/invariants";
 import { waitFor } from "../../support/parallel";
 import { createPersistenceTestContext, type PersistenceTestContext } from "../../support/persistence";
-import { buildConsumerRig, counterValue, sendWagerMessage, type ConsumerRig } from "../../support/consumer";
-import { createTestQueues, isQueueEmpty, type TestQueues } from "../../support/sqs";
+import { buildConsumerRig, counterValue, sendWagerMessage, wagerMessageBody, type ConsumerRig } from "../../support/consumer";
+import { createTestQueues, isQueueEmpty, receiveUntil, sendMessage, type TestQueues } from "../../support/sqs";
 import { brl } from "../../support/wagering";
 import type { LedgerRepository } from "../../../src/wallet/application/ledger.repository.port";
 import type { WalletLedgerEntry } from "../../../src/wallet/domain/wallet-ledger-entry";
@@ -217,6 +217,143 @@ describe("wager transactions consumer", () => {
       expect(await counterValue(rig.metrics, "wager_retries_total", { reason: "transient_failure" })).toBe(2);
       expect(await counterValue(rig.metrics, "wager_retries_total", { reason: "redelivery" })).toBe(2);
       await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+    });
+  });
+
+  describe("permanent failures", () => {
+    /** Aguarda a principal esvaziar e devolve o que chegou à DLQ (apagando-o, como o helper faz). */
+    async function drainToDlq(expected: number) {
+      rig.poller.start();
+      await queueDrained();
+      await rig.poller.stop();
+      return receiveUntil(queues.client, queues.dlqUrl, (all) => all.length >= expected, 10_000);
+    }
+
+    it("moves invalid JSON to the DLQ with the same group and empties the main queue", async () => {
+      await sendMessage(queues.client, queues.transactionsUrl, "{not json", { groupId: "group-bad" });
+
+      const inDlq = await drainToDlq(1);
+
+      expect(inDlq).toHaveLength(1);
+      expect(inDlq[0]?.body).toBe("{not json");
+      expect(inDlq[0]?.groupId).toBe("group-bad");
+      expect(await isQueueEmpty(queues.client, queues.transactionsUrl)).toBe(true);
+      expect(await counterValue(rig.metrics, "sqs_dlq_messages_total", { reason: "invalid_message" })).toBe(1);
+    });
+
+    it("moves an unknown type, a schema violation and an OPENING request to the DLQ", async () => {
+      const wallet = await rig.harness.createWallet("100.00");
+      const command = rig.harness.command(wallet);
+      const base = JSON.parse(wagerMessageBody(command, "msg-base"));
+      const bodies = [
+        JSON.stringify({ ...base, type: "SomethingElse" }),
+        JSON.stringify({ ...base, data: { ...base.data, money: { amount: "10.5", currency: "BRL" } } }),
+        JSON.stringify({ ...base, data: { ...base.data, kind: "OPENING" } }),
+      ];
+      for (const body of bodies) {
+        await sendMessage(queues.client, queues.transactionsUrl, body, { groupId: wallet.walletId });
+      }
+
+      const inDlq = await drainToDlq(3);
+
+      expect(inDlq.map((message) => message.body).sort()).toEqual([...bodies].sort());
+      expect(await transactionCount(wallet.walletId)).toBe(0);
+      expect(await counterValue(rig.metrics, "sqs_dlq_messages_total", { reason: "invalid_message" })).toBe(3);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+    });
+
+    it("moves a request for a wallet that does not exist to the DLQ", async () => {
+      const ghost = { walletId: randomUUID(), playerId: "player-ghost" };
+      const command = rig.harness.command(ghost);
+
+      await sendWagerMessage(queues, ghost, command, messageIds("msg-ghost").ids[0]!);
+      const inDlq = await drainToDlq(1);
+
+      expect(inDlq).toHaveLength(1);
+      expect(await counterValue(rig.metrics, "sqs_dlq_messages_total", { reason: "permanent_failure" })).toBe(1);
+    });
+
+    it("moves a messageId reused with a different payload to the DLQ and keeps the first effect", async () => {
+      const wallet = await rig.harness.createWallet("100.00");
+      const first = rig.harness.command(wallet, { money: brl("30.00") });
+      const tampered = { ...first, money: brl("90.00") };
+      const { suffix, ids } = messageIds("msg-reused");
+
+      await sendWagerMessage(queues, wallet, first, ids[0]!);
+      // Mesmo messageId, conteúdo diferente: não é redelivery
+      await sendWagerMessage(queues, wallet, tampered, ids[0]!);
+      const inDlq = await drainToDlq(1);
+
+      expect(inDlq).toHaveLength(1);
+      expect(JSON.parse(inDlq[0]!.body).data.money.amount).toBe("90.00");
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
+      expect(await inboxRows(suffix)).toEqual([{ messageId: ids[0]!, processed: true }]);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+    });
+
+    it("keeps the message when the DLQ send fails and delivers it to the DLQ once it recovers", async () => {
+      let failuresLeft = 1;
+      rig = buildConsumerRig(ctx, queues, {
+        deadLetters: (real) => ({
+          send: async (message, info) => {
+            if (failuresLeft > 0) {
+              failuresLeft -= 1;
+              throw new Error("injected DLQ failure");
+            }
+            await real.send(message, info);
+          },
+        }),
+      });
+      await sendMessage(queues.client, queues.transactionsUrl, "not even json", { groupId: "group-dlq-down" });
+
+      const inDlq = await drainToDlq(1);
+
+      expect(failuresLeft).toBe(0);
+      expect(inDlq).toHaveLength(1);
+      expect(await counterValue(rig.metrics, "sqs_dlq_messages_total", { reason: "invalid_message" })).toBe(1);
+      expect(await counterValue(rig.metrics, "wager_retries_total", { reason: "transient_failure" })).toBe(1);
+    });
+  });
+
+  describe("exhausted retries", () => {
+    it("lets the redrive policy move a message that keeps failing transiently to the DLQ", async () => {
+      const limited = await createTestQueues({ visibilityTimeoutSeconds: 3, maxReceiveCount: 2 });
+      try {
+        let attempts = 0;
+        const alwaysFailing: LedgerRepository = {
+          findPage: (...args) => ctx.ledgerRepo.findPage(...args),
+          append: async (entry: WalletLedgerEntry) => {
+            await ctx.ledgerRepo.append(entry);
+            attempts += 1;
+            throw new LockTimeoutError();
+          },
+        };
+        const limitedRig = buildConsumerRig(ctx, limited, { overrides: { ledger: alwaysFailing } });
+        const wallet = await limitedRig.harness.createWallet("100.00");
+        const command = limitedRig.harness.command(wallet, { money: brl("30.00") });
+        const { suffix, ids } = messageIds("msg-doomed");
+
+        await sendWagerMessage(limited, wallet, command, ids[0]!);
+        limitedRig.poller.start();
+        await waitFor(() => isQueueEmpty(limited.client, limited.transactionsUrl), {
+          timeoutMs: 30_000,
+          description: "main queue drained by the redrive policy",
+        });
+        await limitedRig.poller.stop();
+        const inDlq = await receiveUntil(limited.client, limited.dlqUrl, (all) => all.length >= 1, 10_000);
+
+        expect(attempts).toBe(2);
+        expect(inDlq).toHaveLength(1);
+        expect(JSON.parse(inDlq[0]!.body).messageId).toBe(ids[0]!);
+        // Cada tentativa foi desfeita por inteiro: nada de saldo, transação ou inbox
+        expect(await walletOf(wallet.walletId)).toEqual({ balance: "100.00", version: 1 });
+        expect(await transactionCount(wallet.walletId)).toBe(0);
+        expect(await inboxRows(suffix)).toEqual([]);
+        expect(await counterValue(limitedRig.metrics, "sqs_dlq_messages_total", { reason: "max_receive_count" })).toBe(1);
+        await assertLedgerMatchesBalance(wallet.walletId, db.orm.em.fork());
+      } finally {
+        await limited.teardown();
+      }
     });
   });
 });

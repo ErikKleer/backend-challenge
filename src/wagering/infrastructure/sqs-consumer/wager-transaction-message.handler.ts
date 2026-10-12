@@ -1,8 +1,9 @@
+import type { DeadLetterPublisher } from "../../../messaging/application/dead-letter-publisher.port";
 import type { MessageAcknowledger } from "../../../messaging/application/message-acknowledger.port";
 import type { QueueMessage, QueueMessageHandler } from "../../../messaging/application/queue-message";
 import type { AppLogger } from "../../../shared/infrastructure/observability/app-logger";
 import { bindContext, runWithContext } from "../../../shared/infrastructure/observability/execution-context";
-import type { MetricsService } from "../../../shared/infrastructure/observability/metrics.service";
+import type { DlqReason, MetricsService } from "../../../shared/infrastructure/observability/metrics.service";
 import type { SubmitWagerTransactionUseCase } from "../../application/submit-wager-transaction.use-case";
 import { classifyConsumerError, retryDelaySeconds } from "./error-classification";
 import { hashMessageContent, parseWagerTransactionMessage } from "./wager-transaction-message";
@@ -20,8 +21,7 @@ export interface WagerTransactionMessageHandlerOptions {
 type Disposition =
   | { action: "ack"; outcome: string }
   | { action: "retry"; code: string }
-  /** Permanente: sem ack e sem retry explícito; o destino é decidido pelo chamador. */
-  | { action: "reject"; code: string };
+  | { action: "dead-letter"; code: string; reason: DlqReason };
 
 /**
  * Processa uma mensagem de `wager-transactions.fifo` pelo **mesmo caso de uso** do HTTP.
@@ -34,12 +34,13 @@ type Disposition =
  * Destino de cada mensagem (ADR 24):
  * - resultado de negócio, replay ou conflito de idempotência ⇒ ack;
  * - falha transitória ⇒ sem ack, `ChangeMessageVisibility` com backoff exponencial;
- * - falha permanente ⇒ DLQ.
+ * - falha permanente ⇒ DLQ (envio explícito e depois ack da fila principal).
  */
 export class WagerTransactionMessageHandler implements QueueMessageHandler {
   constructor(
     private readonly useCase: Pick<SubmitWagerTransactionUseCase, "execute">,
     private readonly acknowledger: MessageAcknowledger,
+    private readonly deadLetters: DeadLetterPublisher,
     private readonly logger: AppLogger,
     private readonly metrics: MetricsService,
     private readonly options: WagerTransactionMessageHandlerOptions,
@@ -85,7 +86,11 @@ export class WagerTransactionMessageHandler implements QueueMessageHandler {
           return { action: "retry", code: classification.code };
         case "permanent":
           this.logger.error("sqs message failed permanently", fields);
-          return { action: "reject", code: classification.code };
+          return {
+            action: "dead-letter",
+            code: classification.code,
+            reason: classification.dlqReason ?? "permanent_failure",
+          };
       }
     }
   }
@@ -98,10 +103,38 @@ export class WagerTransactionMessageHandler implements QueueMessageHandler {
       case "retry":
         await this.scheduleRetry(message, disposition.code);
         return;
-      case "reject":
-        // O destino definitivo (DLQ) entra no commit seguinte; até lá a redrive policy o decide
+      case "dead-letter":
+        await this.deadLetter(message, disposition.reason, disposition.code);
         return;
     }
+  }
+
+  /**
+   * Envia à DLQ e só então apaga da fila principal. Se o envio falhar, nada foi apagado: a
+   * mensagem volta como falha transitória e a redrive policy a protege de um laço infinito.
+   * Se o ack falhar depois do envio, a mensagem reaparece e é reenviada com o mesmo
+   * `MessageDeduplicationId`, que o FIFO descarta.
+   */
+  private async deadLetter(message: QueueMessage, reason: DlqReason, code: string): Promise<void> {
+    try {
+      await this.deadLetters.send(message, { reason, errorCode: code });
+    } catch (error) {
+      this.logger.error("sqs message could not be sent to the DLQ", {
+        sqsMessageId: message.id,
+        errorCode: code,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await this.scheduleRetry(message, "DLQ_UNAVAILABLE");
+      return;
+    }
+    this.metrics.recordDlqMessage(reason);
+    this.logger.error("sqs message moved to the DLQ", {
+      sqsMessageId: message.id,
+      receiveCount: message.receiveCount,
+      reason,
+      errorCode: code,
+    });
+    await this.acknowledge(message);
   }
 
   private async acknowledge(message: QueueMessage): Promise<void> {

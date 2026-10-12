@@ -1,4 +1,6 @@
+import type { DeadLetterPublisher } from "../../src/messaging/application/dead-letter-publisher.port";
 import type { MessageAcknowledger } from "../../src/messaging/application/message-acknowledger.port";
+import { SqsDeadLetterPublisher } from "../../src/messaging/infrastructure/sqs/sqs-dead-letter-publisher";
 import { SqsMessageAcknowledger } from "../../src/messaging/infrastructure/sqs/sqs-message-acknowledger";
 import { SqsMessagePoller } from "../../src/messaging/infrastructure/sqs/sqs-message-poller";
 import { SqsQueueUrlResolver } from "../../src/messaging/infrastructure/sqs/sqs-queue-url.resolver";
@@ -18,6 +20,8 @@ export interface ConsumerRigOptions {
   useCase?: (real: SubmitWagerTransactionUseCase) => Pick<SubmitWagerTransactionUseCase, "execute">;
   /** Falha injetada em volta do acknowledger SQS real. */
   acknowledger?: (real: MessageAcknowledger) => MessageAcknowledger;
+  /** Falha injetada em volta da publicação real na DLQ. */
+  deadLetters?: (real: DeadLetterPublisher) => DeadLetterPublisher;
   concurrency?: number;
   shutdownTimeoutMs?: number;
 }
@@ -44,9 +48,14 @@ export function buildConsumerRig(
   const queueUrl = new SqsQueueUrlResolver(queues.client, queues.transactionsQueueName);
   const realAcknowledger = new SqsMessageAcknowledger(queues.client, queueUrl);
   const acknowledger = options.acknowledger?.(realAcknowledger) ?? realAcknowledger;
+  const realDeadLetters = new SqsDeadLetterPublisher(
+    queues.client,
+    new SqsQueueUrlResolver(queues.client, queues.dlqQueueName),
+  );
+  const deadLetters = options.deadLetters?.(realDeadLetters) ?? realDeadLetters;
   const useCase = options.useCase?.(harness.useCase) ?? harness.useCase;
 
-  const handler = new WagerTransactionMessageHandler(useCase, acknowledger, logger, harness.metrics, {
+  const handler = new WagerTransactionMessageHandler(useCase, acknowledger, deadLetters, logger, harness.metrics, {
     // Backoff mínimo (inteiro de segundos exigido pelo SQS) para os testes terminarem rápido
     retryBaseSeconds: 1,
     retryMaxSeconds: 1,
