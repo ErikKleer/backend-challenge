@@ -8,6 +8,7 @@ import {
   WagerTransactionStatus,
 } from "../../../src/wagering/domain/wager-transaction-types";
 import type { OutboxRepository } from "../../../src/messaging/application/outbox.repository.port";
+import { InboxMessage } from "../../../src/messaging/domain/inbox-message";
 import { deriveEventId } from "../../../src/messaging/domain/event-id";
 import type { OutboxMessage } from "../../../src/messaging/domain/outbox-message";
 import type { LedgerRepository } from "../../../src/wallet/application/ledger.repository.port";
@@ -659,6 +660,22 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
       expect(row?.processed).toBe(true);
     });
 
+    it("processes a message whose inbox record exists but whose effect was never stored", async () => {
+      const wallet = await harness.createWallet("100.00");
+      const command = harness.command(wallet, { money: brl("30.00") });
+      await ctx.unitOfWork.run(async () => {
+        await ctx.inboxRepo.tryReceive(
+          InboxMessage.receive({ ...inbox("msg-orphan"), receivedAt: ctx.clock.now() }),
+        );
+      });
+
+      const result = await harness.useCase.execute(command, { inbox: inbox("msg-orphan") });
+
+      expect(result.idempotentReplay).toBe(false);
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
+      expect(await ledgerOf(wallet.walletId)).toHaveLength(1);
+    });
+
     it("rolls the inbox record back together with a failed processing", async () => {
       const failingLedger: LedgerRepository = {
         append: async (entry: WalletLedgerEntry) => {
@@ -736,6 +753,82 @@ describe("SubmitWagerTransactionUseCase (PostgreSQL)", () => {
       expect(new Set(results.map((result) => result.transactionId)).size).toBe(1);
       expect(new Set(results.map((result) => result.balance.amount))).toEqual(new Set(["70.00"]));
       expect(await ledgerOf(wallet.walletId)).toHaveLength(1);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
+    });
+
+    it("lets exactly one payload win when the same key arrives with different amounts at once", async () => {
+      const wallet = await harness.createWallet("100.00");
+      const base = harness.command(wallet);
+      const amounts = ["10.00", "11.00", "12.00", "13.00", "14.00", "15.00"];
+      const start = createBarrier(amounts.length);
+      const attempt = async (amount: string) => {
+        await start();
+        return submit({ ...base, money: brl(amount) });
+      };
+
+      const outcomes = await Promise.allSettled(amounts.map(attempt));
+
+      const fulfilled = outcomes.filter((outcome) => outcome.status === "fulfilled");
+      const rejected = outcomes.filter(
+        (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+      );
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(amounts.length - 1);
+      for (const outcome of rejected) {
+        expect(outcome.reason).toBeInstanceOf(IdempotencyConflictError);
+      }
+      expect(await ledgerOf(wallet.walletId)).toHaveLength(1);
+      expect(await countTransactions(wallet.walletId)).toBe(1);
+      await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
+    });
+
+    it("lets exactly one key win when the same (provider, external id) arrives under different keys at once", async () => {
+      const wallet = await harness.createWallet("100.00");
+      const base = harness.command(wallet, { money: brl("10.00") });
+      const start = createBarrier(6);
+      const attempt = async (n: number) => {
+        await start();
+        return submit({ ...base, idempotencyKey: `${base.idempotencyKey}:${n}` });
+      };
+
+      const outcomes = await Promise.allSettled(Array.from({ length: 6 }, (_, n) => attempt(n)));
+
+      expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected") {
+          expect(outcome.reason).toBeInstanceOf(IdempotencyConflictError);
+        }
+      }
+      expect(await ledgerOf(wallet.walletId)).toHaveLength(1);
+      expect(await countTransactions(wallet.walletId)).toBe(1);
+    });
+
+    it("applies the effect exactly once when one of two simultaneous identical requests fails", async () => {
+      const failingLedger: LedgerRepository = {
+        append: async (entry: WalletLedgerEntry) => {
+          await ctx.ledgerRepo.append(entry);
+          throw new Error("injected failure after ledger append");
+        },
+      };
+      const failing = new WageringHarness(ctx, { ledger: failingLedger });
+      const wallet = await harness.createWallet("100.00");
+      const command = harness.command(wallet, { money: brl("30.00") });
+      const start = createBarrier(2);
+      const run = async (useCase: WageringHarness) => {
+        await start();
+        return useCase.useCase.execute(command);
+      };
+
+      const [broken, healthy] = await Promise.allSettled([run(failing), run(harness)]);
+
+      // Quem ganha a inserção decide: se a saudável vence, a defeituosa vira replay e
+      // também conclui. Em qualquer ordem, a saudável conclui e o efeito é único.
+      expect(healthy.status).toBe("fulfilled");
+      if (broken.status === "rejected") {
+        expect(String(broken.reason)).toContain("injected failure after ledger append");
+      }
+      expect(await ledgerOf(wallet.walletId)).toHaveLength(1);
+      expect(await walletOf(wallet.walletId)).toEqual({ balance: "70.00", version: 2 });
       await assertLedgerMatchesBalance(wallet.walletId, db.orm.em);
     });
   });
